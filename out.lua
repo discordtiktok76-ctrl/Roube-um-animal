@@ -5601,7 +5601,7 @@ CopyBtn.Icon.Image = (getcustomasset and isfile and isfile("DEX_REContinued/cont
 
 ["ScriptViewer"] = function()
 	local Main, Lib, Apps, Settings
-	local Explorer, Properties, ScriptViewer, Notebook, SaveInstance
+	local Explorer, Properties, ScriptViewer, Notebook, SaveInstance, DataExplorer
 	local API, RMD, Env, Service, Plr, Create, CreateSimple
 
 	local function InitDeps(Data)
@@ -5612,7 +5612,7 @@ CopyBtn.Icon.Image = (getcustomasset and isfile and isfile("DEX_REContinued/cont
 
 	local function InitAfterMain()
 		Explorer, Properties, ScriptViewer = Apps.Explorer, Apps.Properties, Apps.ScriptViewer
-		Notebook, SaveInstance = Apps.Notebook, Apps.SaveInstance
+		Notebook, SaveInstance, DataExplorer = Apps.Notebook, Apps.SaveInstance, Apps.DataExplorer
 	end
 
 	local ExecutorName, ExecutorVersion = "Unknown", "???"
@@ -5722,7 +5722,7 @@ CopyBtn.Icon.Image = (getcustomasset and isfile and isfile("DEX_REContinued/cont
 			Window.IgnoreScale = true
 			if Window.UIScale then Window.UIScale.Scale = 1 end
 			Window:SetTitle("Notepad")
-			Window:Resize(540, 340)
+			Window:Resize(430, 270)
 			ScriptViewer.Window = Window
 
 			local TopHeader = Instance.new("Frame", Window.GuiElems.Content)
@@ -5734,25 +5734,105 @@ CopyBtn.Icon.Image = (getcustomasset and isfile and isfile("DEX_REContinued/cont
 			local function CreateTopBtn(Text, Width, Order, OnClick)
 				local Btn = Instance.new("TextButton", TopHeader)
 				Btn.Size, Btn.BackgroundTransparency, Btn.Text = UDim2.new(0, Width, 1, 0), 1, Text
-				Btn.TextColor3, Btn.Font, Btn.TextSize, Btn.LayoutOrder = Settings.Theme.Text, Enum.Font.SourceSans, 13, Order
+				Btn.TextColor3, Btn.Font, Btn.TextSize, Btn.LayoutOrder = Settings.Theme.Text, Enum.Font.SourceSans, 12, Order
+				Btn.AutoButtonColor = true
 				Btn.MouseButton1Click:Connect(OnClick)
 				return Btn
 			end
 
-			CreateTopBtn("Copy", 45, 1, function() if Env.setclipboard and CodeFrame then Env.setclipboard(CodeFrame:GetText()) end end)
-			CreateTopBtn("Save File", 60, 2, function() if CodeFrame then Lib.SaveAsPrompt("Place_" .. game.PlaceId .. "_Script_" .. os.time() .. ".txt", CodeFrame:GetText()) end end)
-			CreateTopBtn("Dump Funcs", 75, 3, function() if PreviousScr then pcall(ScriptViewer.DumpFunctions, PreviousScr) end end)
-			CreateTopBtn("Execute", 55, 4, function()
+			CreateTopBtn("Copy", 38, 1, function() if Env.setclipboard and CodeFrame then Env.setclipboard(CodeFrame:GetText()) end end)
+			CreateTopBtn("Save", 42, 2, function() if CodeFrame then Lib.SaveAsPrompt("Place_" .. game.PlaceId .. "_Script_" .. os.time() .. ".txt", CodeFrame:GetText()) end end)
+			CreateTopBtn("Dump", 42, 3, function() if PreviousScr then pcall(ScriptViewer.DumpFunctions, PreviousScr) end end)
+			CreateTopBtn("Run", 38, 4, function()
 				if env.loadstring and CodeFrame then
 					local S, F = pcall(env.loadstring, CodeFrame:GetText(), "DEX")
 					if S and F then coroutine.wrap(F)() end
 				end
 			end)
-			CreateTopBtn("Clear", 45, 5, function() if CodeFrame then CodeFrame:SetText("") end end)
+			CreateTopBtn("Clear", 40, 5, function() if CodeFrame then CodeFrame:SetText("") end end)
+
+			-- One compact Bytecode button exposes all supported function-analysis APIs.
+			local BytecodeMenu
+			local BytecodeBtn = CreateTopBtn("Bytecode", 58, 6, function()
+				if BytecodeMenu then
+					BytecodeMenu.Visible = not BytecodeMenu.Visible
+					return
+				end
+				BytecodeMenu = Instance.new("Frame", Window.GuiElems.Content)
+				BytecodeMenu.Size = UDim2.new(0, 190, 0, 78)
+				BytecodeMenu.Position = UDim2.new(0, 4, 0, 24)
+				BytecodeMenu.BackgroundColor3 = Settings.Theme.Main2
+				BytecodeMenu.BorderColor3 = Settings.Theme.Outline1
+				BytecodeMenu.ZIndex = 60
+
+				local function AddBytecodeAction(Text, Y, Callback, Enabled)
+					local B = Instance.new("TextButton", BytecodeMenu)
+					B.Size = UDim2.new(1, -8, 0, 20)
+					B.Position = UDim2.new(0, 4, 0, Y)
+					B.BackgroundColor3 = Settings.Theme.TextBox
+					B.BorderColor3 = Settings.Theme.Outline3
+					B.Text = Text .. (Enabled and "" or " (N/A)")
+					B.TextColor3 = Enabled and Settings.Theme.Text or Color3.fromRGB(110, 110, 110)
+					B.Font, B.TextSize, B.ZIndex = Enum.Font.SourceSans, 11, 61
+					B.Active = Enabled
+					if Enabled then B.MouseButton1Click:Connect(function() BytecodeMenu.Visible = false; Callback() end) end
+				end
+
+				local Target = DataExplorer and DataExplorer.SelectedResult and DataExplorer.SelectedResult.Ref
+				local HasGet = type(Env.getfunctionbytecode) == "function"
+				local HasDump = type(Env.dumpbytecode) == "function" or type(Env.dumpfunctionbytecode) == "function"
+				local HasDis = type(Env.disassemblefunction) == "function"
+
+				local function ViewFunction()
+					if not Target then return end
+					local Getter = Env.getfunctionbytecode
+					if type(Getter) ~= "function" then return end
+					local S, Bytecode = pcall(Getter, Target)
+					if not S or Bytecode == nil then return end
+					local Text = "-- Function bytecode retrieved."
+					if type(Env.decompile) == "function" then
+						local DS, DirectResult = pcall(Env.decompile, Target)
+						if DS and type(DirectResult) == "string" and DirectResult ~= "" then
+							Text = DirectResult
+						else
+							local BS, ByteResult = pcall(Env.decompile, Bytecode)
+							if BS and ByteResult then Text = tostring(ByteResult) end
+						end
+					end
+					local D = Instance.new("LocalScript")
+					D.Name = "FunctionView"
+					ScriptViewer.EditedScriptsCache[D] = Text
+					ScriptViewer.ViewScript(D)
+				end
+
+				local function SaveFunction()
+					if not Target then return end
+					local Getter = Env.getfunctionbytecode or Env.dumpbytecode or Env.dumpfunctionbytecode
+					if type(Getter) ~= "function" then return end
+					local S, Bytecode = pcall(Getter, Target)
+					if S and Bytecode ~= nil then Lib.SaveAsPrompt("func_" .. tostring(Lib.GetHash(Target)) .. "_bytecode.txt", tostring(Bytecode)) end
+				end
+
+				local function Disassemble()
+					if not Target or type(Env.disassemblefunction) ~= "function" then return end
+					local S, Result = pcall(Env.disassemblefunction, Target)
+					if not S or Result == nil then return end
+					local D = Instance.new("LocalScript")
+					D.Name = "Disassembly"
+					ScriptViewer.EditedScriptsCache[D] = tostring(Result)
+					ScriptViewer.ViewScript(D)
+				end
+
+				AddBytecodeAction("View Decompiled Function", 4, ViewFunction, HasGet and Target ~= nil)
+				AddBytecodeAction("Save Function Bytecode", 28, SaveFunction, HasDump and Target ~= nil or HasGet and Target ~= nil)
+				AddBytecodeAction("Disassemble Function", 52, Disassemble, HasDis and Target ~= nil)
+			end)
+
+			local BytecodeBtnOrder = 6
 
 			ScriptViewer.IsEditing = false
 			local EditBtn
-			EditBtn = CreateTopBtn("Edit Script", 70, 6, function()
+			EditBtn = CreateTopBtn("Edit", 42, 7, function()
 				if not PreviousScr then return end
 				ScriptViewer.IsEditing = not ScriptViewer.IsEditing
 				EditBtn.Text = ScriptViewer.IsEditing and "Save Edit" or "Edit Script"
@@ -5775,10 +5855,10 @@ CopyBtn.Icon.Image = (getcustomasset and isfile and isfile("DEX_REContinued/cont
 			ScriptViewer.EditButton = EditBtn
 
 			local Spacer = Instance.new("Frame", TopHeader)
-			Spacer.BackgroundTransparency, Spacer.Size, Spacer.LayoutOrder = 1, UDim2.new(1, -385, 1, 0), 7
+			Spacer.BackgroundTransparency, Spacer.Size, Spacer.LayoutOrder = 1, UDim2.new(1, -318, 1, 0), 8
 
 			local SearchToggleBtn = Instance.new("ImageButton", TopHeader)
-			SearchToggleBtn.Size, SearchToggleBtn.BackgroundTransparency, SearchToggleBtn.LayoutOrder = UDim2.new(0, 18, 0, 18), 1, 8
+			SearchToggleBtn.Size, SearchToggleBtn.BackgroundTransparency, SearchToggleBtn.LayoutOrder = UDim2.new(0, 18, 0, 18), 1, 9
 			SearchToggleBtn.Image = (getcustomasset and isfile and isfile("DEX_REContinued/Images/search2.png")) and getcustomasset("DEX_REContinued/Images/search2.png") or "rbxassetid://5034718129"
 			SearchToggleBtn.ImageColor3 = Settings.Theme.Text
 
@@ -5927,7 +6007,7 @@ CopyBtn.Icon.Image = (getcustomasset and isfile and isfile("DEX_REContinued/cont
 		end
 
 		local SearchOverlay = Instance.new("Frame", Window.GuiElems.Content)
-		SearchOverlay.Size, SearchOverlay.Position = UDim2.new(0, 280, 0, 48), UDim2.new(1, -286, 0, 26)
+		SearchOverlay.Size, SearchOverlay.Position = UDim2.new(0, 230, 0, 48), UDim2.new(1, -236, 0, 26)
 		SearchOverlay.BackgroundColor3, SearchOverlay.BorderColor3, SearchOverlay.BorderSizePixel, SearchOverlay.ZIndex, SearchOverlay.Visible = Settings.Theme.Main2, Settings.Theme.Outline1, 1, 40, false
 
 		local SearchInput = Instance.new("TextBox", SearchOverlay)
@@ -17594,9 +17674,12 @@ local func = findfunc("]] .. tostring(Target) .. [[")]]
 
 									local Decompiled
 									if type(env.decompile) == "function" then
-										local DecompileSuccess, ResultText = pcall(env.decompile, Bytecode)
-										if DecompileSuccess and ResultText then
-											Decompiled = tostring(ResultText)
+										local DirectSuccess, DirectText = pcall(env.decompile, Target)
+										if DirectSuccess and type(DirectText) == "string" and DirectText ~= "" then
+											Decompiled = DirectText
+										else
+											local DecompileSuccess, ResultText = pcall(env.decompile, Bytecode)
+											if DecompileSuccess and ResultText then Decompiled = tostring(ResultText) end
 										end
 									end
 
