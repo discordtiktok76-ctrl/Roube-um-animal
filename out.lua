@@ -1523,15 +1523,24 @@ local function main()
 
 				entry.Indent.EntryName.TextTruncate = (Settings.Explorer.UseNameWidth and Enum.TextTruncate.None or Enum.TextTruncate.AtEnd)
 
-				Explorer.MiscIcons:DisplayExplorerIcons(entry.Indent.Icon, obj.ClassName)
+				-- Reset the reusable row back to its normal class icon first.
+				Explorer.MiscIcons:DisplayExplorerIcons(entry.Indent, obj.ClassName)
 
-				if obj:IsA("Animation") then
-					-- Keep the existing Explorer layout, but use the requested animation-status icon.
-					entry.Indent.Icon.Image = "rbxassetid://79777748023029"
-					entry.Indent.Icon.ImageRectOffset = Vector2.zero
-					entry.Indent.Icon.ImageRectSize = Vector2.zero
-					entry.Indent.Icon.ScaleType = Enum.ScaleType.Fit
-					entry.Indent.Icon.ImageColor3 = ModelViewer.GetAnimationStatus(obj) and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+				-- ONLY true Animation Instances use the custom animation icon.
+				-- The icon is applied to the actual IconMap so recycled rows cannot
+				-- accidentally keep the animation icon on Scripts, Models, Parts, etc.
+				local rowIcon = entry.Indent:FindFirstChild("IconMap")
+				if rowIcon then
+					rowIcon.ImageColor3 = Color3.new(1,1,1)
+					if obj:IsA("Animation") then
+						rowIcon.Image = ModelViewer.AnimationIcon
+						rowIcon.ImageRectOffset = Vector2.zero
+						rowIcon.ImageRectSize = Vector2.zero
+						rowIcon.ScaleType = Enum.ScaleType.Fit
+						rowIcon.Size = UDim2.fromOffset(16,16)
+						rowIcon.Position = UDim2.new(0,4,0,2)
+						rowIcon.ImageColor3 = Color3.new(1,1,1)
+					end
 				end
 
 				if selection.Map[node] then
@@ -3146,13 +3155,143 @@ return search]==]
 	end
 
 	Explorer.InitSearch = function()
-		local searchBox = Explorer.GuiElems.ToolBar.SearchFrame.SearchBox
+		local searchFrame = Explorer.GuiElems.ToolBar.SearchFrame
+		local searchBox = searchFrame.SearchBox
 		Explorer.GuiElems.SearchBar = searchBox
 
 		Lib.ViewportTextBox.convert(searchBox)
 
+		-- Ghost completion that stays visually inside the existing search bar.
+		-- The original TextBox remains the editable field; Tab/Right accepts the
+		-- suggested existing Instance name.
+		local suggestion = Instance.new("TextLabel")
+		suggestion.Name = "AutocompleteSuggestion"
+		suggestion.BackgroundTransparency = 1
+		suggestion.BorderSizePixel = 0
+		suggestion.Position = UDim2.new(0,4,0,0)
+		suggestion.Size = UDim2.new(1,-8,1,0)
+		suggestion.Font = searchBox.Font
+		suggestion.TextSize = searchBox.TextSize
+		suggestion.TextXAlignment = Enum.TextXAlignment.Left
+		suggestion.TextYAlignment = Enum.TextYAlignment.Center
+		suggestion.TextColor3 = Color3.fromRGB(135,135,135)
+		suggestion.TextTransparency = 0.35
+		suggestion.ZIndex = math.max(searchBox.ZIndex - 1, 1)
+		suggestion.Text = ""
+		suggestion.TextTruncate = Enum.TextTruncate.AtEnd
+		suggestion.Parent = searchFrame
+	
+		searchBox.ZIndex = suggestion.ZIndex + 1
+
+		local autocompleteGeneration = 0
+		local autocompleteCache = nil
+
+		local function buildAutocompleteCache()
+			local names, seen = {}, {}
+			for obj,node in next,nodes do
+				if obj and typeof(obj) == "Instance" then
+					local name = tostring(obj.Name or "")
+					if name ~= "" then
+						local key = string.lower(name)
+						if not seen[key] then
+							seen[key] = true
+							names[#names+1] = name
+						end
+					end
+				end
+			end
+			table.sort(names, function(a,b)
+				local al,bl = string.lower(a),string.lower(b)
+				if #a ~= #b then return #a < #b end
+				return al < bl
+			end)
+			autocompleteCache = names
+		end
+
+		local function getSuggestion(query)
+			query = tostring(query or "")
+			if query == "" then return "" end
+			if not autocompleteCache then buildAutocompleteCache() end
+
+			local lowerQuery = string.lower(query)
+			local bestName, bestRank
+			for i = 1,#autocompleteCache do
+				local name = autocompleteCache[i]
+				local lowerName = string.lower(name)
+				if string.sub(lowerName,1,#lowerQuery) == lowerQuery and lowerName ~= lowerQuery then
+					-- Prefix matches are ranked by: shortest completion, then
+					-- case-insensitive alphabetical order. This yields S -> SC and ST -> STC.
+					local rank = (#name - #query) * 100000 + i
+					if not bestRank or rank < bestRank then
+						bestRank, bestName = rank, name
+					end
+				end
+			end
+
+			return bestName or ""
+		end
+
+		local TextService = game:GetService("TextService")
+
+		local function updateSuggestion()
+			local typed = searchBox.Text or ""
+			local candidate = getSuggestion(typed)
+			if candidate ~= "" and string.sub(string.lower(candidate),1,#typed) == string.lower(typed) then
+				-- Draw only the untyped suffix immediately after the real TextBox text,
+				-- so the completion looks like native ghost text instead of duplicated text.
+				local suffix = string.sub(candidate,#typed+1)
+				local measured = TextService:GetTextSize(typed, searchBox.TextSize, searchBox.Font, Vector2.new(10000, 100))
+				suggestion.Position = UDim2.new(0,4 + measured.X,0,0)
+				suggestion.Size = UDim2.new(1,-8 - measured.X,1,0)
+				suggestion.Text = suffix
+			else
+				suggestion.Position = UDim2.new(0,4,0,0)
+				suggestion.Size = UDim2.new(1,-8,1,0)
+				suggestion.Text = ""
+			end
+		end
+
+		local function acceptSuggestion()
+			local typed = searchBox.Text or ""
+			local candidate = getSuggestion(typed)
+			if candidate ~= "" and string.lower(candidate) ~= string.lower(typed) then
+				searchBox.Text = candidate
+				searchBox.CursorPosition = #candidate + 1
+				updateSuggestion()
+				Explorer.DoSearch(candidate)
+				return true
+			end
+			return false
+		end
+
+		searchBox.InputBegan:Connect(function(input)
+			if input.KeyCode == Enum.KeyCode.Tab or input.KeyCode == Enum.KeyCode.Right then
+				acceptSuggestion()
+			end
+		end)
+
+		searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+			autocompleteGeneration = autocompleteGeneration + 1
+			local generation = autocompleteGeneration
+			updateSuggestion()
+			-- Search as the user types, while coalescing very rapid keyboard input.
+			task.delay(0.035, function()
+				if generation ~= autocompleteGeneration then return end
+				Explorer.DoSearch(searchBox.Text)
+			end)
+		end)
+
 		searchBox.FocusLost:Connect(function()
 			Explorer.DoSearch(searchBox.Text)
+			suggestion.Text = ""
+		end)
+
+		-- Rebuild candidates whenever the Explorer's object set changes.
+		task.spawn(function()
+			while searchBox.Parent do
+				task.wait(2)
+				autocompleteCache = nil
+			end
 		end)
 	end
 
@@ -5509,10 +5648,17 @@ local function main()
 			else
 				Frame.ClipsDescendants = true
 
-				local obj = Instance.new("ImageLabel", Frame)
-				obj.BackgroundTransparency = 1
+				local obj = Frame:FindFirstChild("IconMap")
+				if not obj then
+					obj = Instance.new("ImageLabel")
+					obj.Parent = Frame
+					obj.BackgroundTransparency = 1
+					obj.Name = "IconMap"
+				end
+				-- Rows are recycled, so always restore the default atlas image before
+				-- applying any per-class/custom icon.
 				obj.Image = ("http://www.roblox.com/asset/?id=" .. (self.ExplorerIcons.MapId))
-				obj.Name = "IconMap"
+				obj.ImageColor3 = Color3.new(1,1,1)
 				self:GetExplorerIcon(obj, index)
 			end
 		end
@@ -10893,81 +11039,22 @@ local function main()
 	local animationPreviewCache = {}
 	local animationPreviewChecking = {}
 	local ANIMATION_ICON = "rbxassetid://79777748023029"
-	
+
 	local function getAnimationId(animation)
 		if not animation or not animation:IsA("Animation") then return nil end
-		local id = tostring(animation.AnimationId or "")
-		local assetId = id:match("(%d+)")
-		return assetId and assetId ~= "0" and assetId or nil
+		local raw = tostring(animation.AnimationId or "")
+		local id = raw:match("[?&]id=(%d+)") or raw:match("(%d+)")
+		return id and id ~= "0" and id or nil
 	end
 
-	local function getAnimationPreviewResult(animation)
-		local id = getAnimationId(animation)
-		if not id then return false end
-		return animationPreviewCache[id]
-	end
-
-	local function checkAnimationPreview(animation)
-		local id = getAnimationId(animation)
-		if not id then return false end
-		if animationPreviewCache[id] ~= nil then return animationPreviewCache[id] end
-		if animationPreviewChecking[id] then return false end
-
-		animationPreviewChecking[id] = true
-		task.spawn(function()
-			local success = false
-			local ok = pcall(function()
-				local clipProvider = service.AnimationClipProvider
-				if clipProvider then
-					local clip = clipProvider:GetAnimationClipAsync("rbxassetid://"..id)
-					success = clip ~= nil
-				end
-			end)
-			if not ok or not success then
-				-- Fallback: test loading on a temporary copy, never on the live character.
-				pcall(function()
-					local character = plr.Character
-					local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-					if not humanoid then return end
-					local archivable = character.Archivable
-					character.Archivable = true
-					local probeCharacter = character:Clone()
-					character.Archivable = archivable
-					if not probeCharacter then return end
-
-					local probeHumanoid = probeCharacter:FindFirstChildOfClass("Humanoid")
-					local animator = probeHumanoid and (probeHumanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", probeHumanoid))
-					local probe = Instance.new("Animation")
-					probe.AnimationId = "rbxassetid://"..id
-					local loaded, track = animator and pcall(animator.LoadAnimation, animator, probe)
-					success = loaded and track ~= nil
-					if track then pcall(track.Stop, track, 0) end
-					probe:Destroy()
-					probeCharacter:Destroy()
-				end)
-			end
-			animationPreviewCache[id] = success
-			animationPreviewChecking[id] = nil
-			if Explorer and Explorer.PerformRefresh then
-				pcall(Explorer.PerformRefresh)
-			end
-		end)
-		return false
-	end
-
+	-- The status is kept only for API compatibility with the Explorer.
+	-- The icon itself is ALWAYS white and is shown ONLY for Animation instances.
 	ModelViewer.AnimationIcon = ANIMATION_ICON
 	ModelViewer.GetAnimationStatus = function(animation)
-		if not animation or not animation:IsA("Animation") then return nil end
-		local id = getAnimationId(animation)
-		if not id then return false end
-		if animationPreviewCache[id] ~= nil then return animationPreviewCache[id]
-		end
-		checkAnimationPreview(animation)
-		return false
+		return animation and animation:IsA("Animation") and getAnimationId(animation) ~= nil or nil
 	end
-
 	ModelViewer.CanPreviewAnimation = function(animation)
-		return ModelViewer.GetAnimationStatus(animation) == true
+		return animation and animation:IsA("Animation") and getAnimationId(animation) ~= nil or false
 	end
 
 	ModelViewer.StopAnimation = function()
@@ -10980,7 +11067,8 @@ local function main()
 	ModelViewer.StopViewModel = function(updating)
 		ModelViewer.StopAnimation()
 		if updating then
-			viewportFrame:FindFirstChildOfClass("Model"):Destroy()
+			local currentModel = viewportFrame:FindFirstChildOfClass("Model")
+			if currentModel then currentModel:Destroy() end
 		else
 			if camera then camera = nil end
 			if model then model = nil end
@@ -11070,44 +11158,56 @@ local function main()
 
 	ModelViewer.ViewAnimation = function(animation)
 		if not animation or not animation:IsA("Animation") then return false end
-		if not ModelViewer.CanPreviewAnimation(animation) then
-			warn("Dex++: Animation cannot be previewed in 3D: "..tostring(animation.AnimationId))
+
+		local animationId = getAnimationId(animation)
+		if not animationId then
+			warn("Dex++: This Animation has no valid AnimationId")
 			return false
 		end
 
 		ModelViewer.StopViewModel()
+
 		local character = plr.Character
-		if not character then return false end
+		if not character then
+			warn("Dex++: Your character is not available for Animation 3D Preview")
+			return false
+		end
 
 		local oldArchivable = character.Archivable
 		character.Archivable = true
-		local cloned = character:Clone()
+		local okClone, cloned = pcall(character.Clone, character)
 		character.Archivable = oldArchivable
-		if not cloned then return false end
+		if not okClone or not cloned then return false end
+
+		-- Animating a rig inside a ViewportFrame is much more reliable through WorldModel.
+		local worldModel = Instance.new("WorldModel")
+		worldModel.Name = "AnimationWorld"
+		worldModel.Parent = viewportFrame
 
 		model = cloned
 		model.Name = "AnimationPreview"
-		model.Parent = viewportFrame
+		model.Parent = worldModel
 
 		local root = model:FindFirstChild("HumanoidRootPart", true)
 		local humanoid = model:FindFirstChildOfClass("Humanoid")
 		if root and root:IsA("BasePart") then
 			model.PrimaryPart = root
-			model:PivotTo(CFrame.new(0, 0, 0))
 		else
 			for _, descendant in ipairs(model:GetDescendants()) do
 				if descendant:IsA("BasePart") then
 					model.PrimaryPart = descendant
-					model:PivotTo(CFrame.new(0, 0, 0))
 					break
 				end
 			end
 		end
+
 		if not model.PrimaryPart or not humanoid then
-			model:Destroy()
+			worldModel:Destroy()
 			model = nil
 			return false
 		end
+
+		model:PivotTo(CFrame.new(0,0,0))
 
 		for _, descendant in ipairs(model:GetDescendants()) do
 			if descendant:IsA("BasePart") then
@@ -11122,18 +11222,42 @@ local function main()
 		end
 
 		local animator = humanoid:FindFirstChildOfClass("Animator")
-		if not animator then animator = Instance.new("Animator", humanoid) end
-		local loaded, track = pcall(animator.LoadAnimation, animator, animation)
-		if not loaded or not track then
-			model:Destroy()
+		if not animator then
+			animator = Instance.new("Animator")
+			animator.Parent = humanoid
+		end
+
+		-- Create a fresh Animation object. This avoids parent/permission quirks
+		-- that can prevent an Animation instance from another hierarchy from loading.
+		local previewAnimation = Instance.new("Animation")
+		previewAnimation.Name = "__DexPreviewAnimation"
+		previewAnimation.AnimationId = "rbxassetid://" .. animationId
+		previewAnimation.Parent = model
+
+		local loaded, trackOrError = pcall(function()
+			return animator:LoadAnimation(previewAnimation)
+		end)
+
+		if not loaded or not trackOrError then
+			warn("Dex++: Could not load Animation 3D preview: " .. tostring(trackOrError))
+			worldModel:Destroy()
 			model = nil
 			return false
 		end
 
-		animationTrack = track
-		track.Looped = true
-		track.Priority = Enum.AnimationPriority.Action
-		track:Play(0.1, 1, 1)
+		animationTrack = trackOrError
+		animationTrack.Looped = true
+		animationTrack.Priority = Enum.AnimationPriority.Action4
+		local played, playError = pcall(function()
+			animationTrack:Play(0.1, 1, 1)
+		end)
+
+		if not played then
+			warn("Dex++: Could not play Animation 3D preview: " .. tostring(playError))
+			ModelViewer.StopViewModel()
+			return false
+		end
+
 		originalModel = animation
 
 		camera = Instance.new("Camera")
@@ -11141,7 +11265,7 @@ local function main()
 		camera.Parent = viewportFrame
 		camera.FieldOfView = 40
 
-		window:SetTitle(animation.Name.." - Animation 3D")
+		window:SetTitle(animation.Name .. " - Animation 3D")
 		pathLabel.Gui.Text = "path: " .. getPath(animation)
 		window:Show()
 		ModelViewer.IsViewing = true
