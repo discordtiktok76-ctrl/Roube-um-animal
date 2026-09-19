@@ -1,0 +1,1301 @@
+--// NORLI HUB
+--// ESP + AUTO + ITEM
+
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+local CoreGui
+pcall(function()
+	CoreGui = game:GetService("CoreGui")
+end)
+
+while not Players.LocalPlayer do
+	task.wait()
+end
+
+local LocalPlayer = Players.LocalPlayer
+
+--// LIMPEZA
+local function CleanupParent(parent)
+	if not parent then
+		return
+	end
+
+	pcall(function()
+		for _, child in ipairs(parent:GetChildren()) do
+			if child.Name == "NorliHub" then
+				child:Destroy()
+			end
+		end
+	end)
+end
+
+CleanupParent(CoreGui)
+
+local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+if not playerGui then
+	pcall(function()
+		playerGui = LocalPlayer:WaitForChild("PlayerGui", 3)
+	end)
+end
+
+CleanupParent(playerGui)
+
+--// ESTADO DOS ESPs
+local ESPStates = {
+	KILLERS = false,
+	SURVIVORS = false,
+	SPECTATORS = false,
+	GENERATORS = false
+}
+
+local COLORS = {
+	KILLERS = Color3.fromRGB(255, 0, 0),
+	SURVIVORS = Color3.fromRGB(0, 255, 0),
+	SPECTATORS = Color3.fromRGB(255, 255, 255),
+	GENERATORS = Color3.fromRGB(255, 255, 0)
+}
+
+local ESPCache = {}
+
+local function IsValidInstance(instance)
+	if not instance then
+		return false
+	end
+
+	local ok, valid = pcall(function()
+		return instance.Parent ~= nil
+	end)
+
+	return ok and valid
+end
+
+local function GetPath(root, names)
+	local current = root
+
+	for _, name in ipairs(names) do
+		if not current then
+			return nil
+		end
+
+		current = current:FindFirstChild(name)
+	end
+
+	return current
+end
+
+local function NormalizeName(name)
+	return tostring(name):lower():gsub("%s+", ""):gsub("%W", "")
+end
+
+local function GetFirstRenderable(instance)
+	if not IsValidInstance(instance) then
+		return nil
+	end
+
+	if instance:IsA("Player") then
+		local character = instance.Character
+		if character and IsValidInstance(character) then
+			return character
+		end
+
+		return nil
+	end
+
+	if instance:IsA("ObjectValue") then
+		return GetFirstRenderable(instance.Value)
+	end
+
+	if instance:IsA("Model") then
+		return instance
+	end
+
+	if instance:IsA("BasePart") then
+		return instance
+	end
+
+	if instance:IsA("Tool") then
+		local handle = instance:FindFirstChild("Handle")
+
+		if handle and handle:IsA("BasePart") then
+			return handle
+		end
+	end
+
+	local model = instance:FindFirstChildWhichIsA("Model")
+	if model then
+		return model
+	end
+
+	local part = instance:FindFirstChildWhichIsA("BasePart")
+	if part then
+		return part
+	end
+
+	local ok, result = pcall(function()
+		for _, desc in ipairs(instance:GetDescendants()) do
+			if desc:IsA("Model") or desc:IsA("BasePart") then
+				return desc
+			end
+		end
+
+		return nil
+	end)
+
+	if ok then
+		return result
+	end
+
+	return nil
+end
+
+local function IsGeneratorName(name)
+	local normal = NormalizeName(name)
+
+	return normal == "generator" or normal:find("generator", 1, true) ~= nil
+end
+
+local function AddFolderTargets(folder, color, desired)
+	if not folder then
+		return
+	end
+
+	for _, child in ipairs(folder:GetChildren()) do
+		local adornee = GetFirstRenderable(child)
+
+		if adornee and IsValidInstance(adornee) then
+			desired[adornee] = color
+		end
+	end
+end
+
+local function AddGeneratorTargets(desired)
+	local exactFolder = GetPath(workspace, {"Map", "Ingame", "Map"})
+	local root = nil
+
+	if exactFolder then
+		root = exactFolder
+	else
+		local ingameFolder = GetPath(workspace, {"Map", "Ingame"})
+
+		if ingameFolder then
+			root = ingameFolder
+		else
+			root = workspace:FindFirstChild("Map")
+		end
+	end
+
+	if not root then
+		return
+	end
+
+	pcall(function()
+		for _, desc in ipairs(root:GetDescendants()) do
+			if IsGeneratorName(desc.Name) then
+				local adornee = GetFirstRenderable(desc)
+
+				if adornee and IsValidInstance(adornee) then
+					desired[adornee] = COLORS.GENERATORS
+				end
+			end
+		end
+	end)
+end
+
+local function MakeHighlight(adornee, color)
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "NorliESP_Aura"
+	highlight.Adornee = adornee
+	highlight.FillColor = color
+	highlight.OutlineColor = color
+	highlight.FillTransparency = 0.7
+	highlight.OutlineTransparency = 0
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.Parent = adornee
+
+	return highlight
+end
+
+local function SyncESP()
+	local desired = {}
+
+	local playersFolder = workspace:FindFirstChild("Players")
+
+	if playersFolder then
+		if ESPStates.KILLERS then
+			AddFolderTargets(playersFolder:FindFirstChild("Killers"), COLORS.KILLERS, desired)
+		end
+
+		if ESPStates.SURVIVORS then
+			AddFolderTargets(playersFolder:FindFirstChild("Survivors"), COLORS.SURVIVORS, desired)
+		end
+
+		if ESPStates.SPECTATORS then
+			AddFolderTargets(playersFolder:FindFirstChild("Spectating"), COLORS.SPECTATORS, desired)
+		end
+	end
+
+	if ESPStates.GENERATORS then
+		AddGeneratorTargets(desired)
+	end
+
+	for adornee, highlight in pairs(ESPCache) do
+		local keep = desired[adornee] ~= nil and IsValidInstance(adornee) and highlight and highlight.Parent
+
+		if not keep then
+			pcall(function()
+				if highlight then
+					highlight:Destroy()
+				end
+			end)
+
+			ESPCache[adornee] = nil
+		end
+	end
+
+	for adornee, color in pairs(desired) do
+		local highlight = ESPCache[adornee]
+
+		if highlight and highlight.Parent then
+			highlight.FillColor = color
+			highlight.OutlineColor = color
+			highlight.Enabled = true
+		else
+			local ok, newHighlight = pcall(MakeHighlight, adornee, color)
+
+			if ok and newHighlight then
+				ESPCache[adornee] = newHighlight
+			end
+		end
+	end
+end
+
+local function CleanupOldHighlights(root)
+	if not root then
+		return
+	end
+
+	pcall(function()
+		for _, desc in ipairs(root:GetDescendants()) do
+			if desc:IsA("Highlight") and desc.Name == "NorliESP_Aura" then
+				desc:Destroy()
+			end
+		end
+	end)
+end
+
+CleanupOldHighlights(workspace:FindFirstChild("Players"))
+CleanupOldHighlights(workspace:FindFirstChild("Map"))
+
+--// CONFIGURAÇÃO DOS ITENS
+local ItemConfigs = {
+	{
+		Key = "MEDKIT",
+		Display = "MEDKIT",
+		Path = {"Map", "Ingame", "Medkit"},
+		Keywords = {
+			"medkit",
+			"medikit",
+			"medkitdrop",
+			"medpack",
+			"healthkit",
+			"firstaid",
+			"firstaidkit"
+		}
+	},
+	{
+		Key = "BLOXYCOLA",
+		Display = "BLOXY COLA",
+		Path = {"Map", "Ingame", "Map", "BloxyCola"},
+		Keywords = {
+			"bloxycola",
+			"bloxy",
+			"cola",
+			"soda"
+		}
+	}
+}
+
+local ItemCache = {}
+local ItemLastScan = {}
+
+local function GetItemConfig(key)
+	for _, config in ipairs(ItemConfigs) do
+		if config.Key == key then
+			return config
+		end
+	end
+
+	return nil
+end
+
+local function MatchKeywords(name, keywords)
+	local normal = NormalizeName(name)
+
+	if normal == "" then
+		return false
+	end
+
+	for _, keyword in ipairs(keywords) do
+		local normalKeyword = NormalizeName(keyword)
+
+		if normalKeyword ~= "" then
+			if normal == normalKeyword or normal:find(normalKeyword, 1, true) then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+local SCAN_LIMIT = 6000
+
+local function ScanContainer(container, keywords, depth, scanned)
+	if not container or depth > 7 or scanned.count > SCAN_LIMIT then
+		return nil
+	end
+
+	local children
+	local ok = pcall(function()
+		children = container:GetChildren()
+	end)
+
+	if not ok or not children then
+		return nil
+	end
+
+	for _, child in ipairs(children) do
+		scanned.count = scanned.count + 1
+
+		if scanned.count > SCAN_LIMIT then
+			return nil
+		end
+
+		if child.Name ~= "Players"
+			and child.Name ~= "Terrain"
+			and child.Name ~= "Camera"
+			and child.Name ~= "NorliHub" then
+
+			if MatchKeywords(child.Name, keywords) then
+				if GetFirstRenderable(child) then
+					return child
+				end
+			end
+
+			if child:IsA("Folder") or child:IsA("Model") then
+				local found = ScanContainer(child, keywords, depth + 1, scanned)
+
+				if found then
+					return found
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+local function FindItem(config)
+	local exact = GetPath(workspace, config.Path)
+
+	if exact and GetFirstRenderable(exact) then
+		return exact
+	end
+
+	local ingame = GetPath(workspace, {"Map", "Ingame"})
+
+	if ingame then
+		local found = ScanContainer(ingame, config.Keywords, 0, {count = 0})
+
+		if found then
+			return found
+		end
+	end
+
+	local map = workspace:FindFirstChild("Map")
+
+	if map then
+		local found = ScanContainer(map, config.Keywords, 0, {count = 0})
+
+		if found then
+			return found
+		end
+	end
+
+	if not map then
+		local found = ScanContainer(workspace, config.Keywords, 0, {count = 0})
+
+		if found then
+			return found
+		end
+	end
+
+	return nil
+end
+
+local function GetCachedItem(key)
+	local cached = ItemCache[key]
+
+	if cached and IsValidInstance(cached) and GetFirstRenderable(cached) then
+		return cached
+	end
+
+	if cached then
+		ItemCache[key] = nil
+	end
+
+	return nil
+end
+
+local function RefreshItem(key, force)
+	local cached = GetCachedItem(key)
+
+	if cached and not force then
+		return cached
+	end
+
+	local now = tick()
+
+	if not force and ItemLastScan[key] and now - ItemLastScan[key] < 3 then
+		return cached
+	end
+
+	local config = GetItemConfig(key)
+
+	if not config then
+		return nil
+	end
+
+	ItemLastScan[key] = now
+
+	local found = FindItem(config)
+	ItemCache[key] = found
+
+	return found
+end
+
+local function AnchorAllParts(instance)
+	pcall(function()
+		if instance:IsA("BasePart") then
+			instance.Anchored = true
+		end
+
+		for _, desc in ipairs(instance:GetDescendants()) do
+			if desc:IsA("BasePart") then
+				desc.Anchored = true
+			end
+		end
+	end)
+end
+
+local function MoveInstanceToPlayer(instance)
+	local character = LocalPlayer.Character
+
+	if not character then
+		return false, "Personagem não encontrado."
+	end
+
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+		or character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("Torso")
+
+	if not rootPart or not rootPart:IsA("BasePart") then
+		return false, "Parte raiz do personagem não encontrada."
+	end
+
+	local targetCFrame = rootPart.CFrame * CFrame.new(0, 1.2, -3)
+
+	local ok, errorMessage = pcall(function()
+		if instance:IsA("Model") then
+			if not instance.PrimaryPart then
+				local firstPart = GetFirstRenderable(instance)
+
+				if firstPart and firstPart:IsA("BasePart") then
+					instance.PrimaryPart = firstPart
+				end
+			end
+
+			if instance.PrimaryPart then
+				instance:PivotTo(targetCFrame)
+			else
+				error("Model sem parte válida.")
+			end
+
+		elseif instance:IsA("BasePart") then
+			instance.CFrame = targetCFrame
+
+		elseif instance:IsA("Tool") then
+			local handle = instance:FindFirstChild("Handle")
+
+			if handle and handle:IsA("BasePart") then
+				handle.CFrame = targetCFrame
+			else
+				instance.Parent = character
+			end
+
+		else
+			local model = instance:FindFirstChildWhichIsA("Model")
+
+			if model then
+				if not model.PrimaryPart then
+					local firstPart = GetFirstRenderable(model)
+
+					if firstPart and firstPart:IsA("BasePart") then
+						model.PrimaryPart = firstPart
+					end
+				end
+
+				if model.PrimaryPart then
+					model:PivotTo(targetCFrame)
+				else
+					error("Model sem parte válida.")
+				end
+			else
+				local parts = {}
+
+				for _, desc in ipairs(instance:GetDescendants()) do
+					if desc:IsA("BasePart") then
+						table.insert(parts, desc)
+					end
+				end
+
+				if #parts == 0 then
+					error("Item sem parte válida.")
+				end
+
+				local primary = parts[1]
+				local offset = targetCFrame * primary.CFrame:Inverse()
+
+				for _, part in ipairs(parts) do
+					part.CFrame = offset * part.CFrame
+				end
+			end
+		end
+
+		AnchorAllParts(instance)
+	end)
+
+	return ok, errorMessage
+end
+
+--// GUI
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "NorliHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local parented = false
+
+if CoreGui then
+	parented = pcall(function()
+		ScreenGui.Parent = CoreGui
+	end)
+end
+
+if not parented then
+	local hui
+
+	pcall(function()
+		if gethui then
+			hui = gethui()
+		end
+	end)
+
+	if hui then
+		parented = pcall(function()
+			ScreenGui.Parent = hui
+		end)
+	end
+end
+
+if not parented then
+	pcall(function()
+		playerGui = LocalPlayer:WaitForChild("PlayerGui", 5)
+	end)
+
+	if playerGui then
+		parented = pcall(function()
+			ScreenGui.Parent = playerGui
+		end)
+	end
+end
+
+--// MAIN
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(210, 290)
+Main.AnchorPoint = Vector2.new(0.5, 0.5)
+Main.Position = UDim2.new(0.5, 0, 0.5, -25)
+Main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+Main.BackgroundTransparency = 0.12
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = true
+Main.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = Main
+
+--// TEXTURA
+local Texture = Instance.new("ImageLabel")
+Texture.Size = UDim2.fromScale(1, 1)
+Texture.BackgroundTransparency = 1
+Texture.Image = "rbxassetid://102991861215975"
+Texture.ImageTransparency = 0.55
+Texture.ScaleType = Enum.ScaleType.Stretch
+Texture.ZIndex = 1
+Texture.Parent = Main
+
+local TextureCorner = Instance.new("UICorner")
+TextureCorner.CornerRadius = UDim.new(0, 8)
+TextureCorner.Parent = Texture
+
+--// CAMADA ESCURA
+local DarkOverlay = Instance.new("Frame")
+DarkOverlay.Size = UDim2.fromScale(1, 1)
+DarkOverlay.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+DarkOverlay.BackgroundTransparency = 0.35
+DarkOverlay.BorderSizePixel = 0
+DarkOverlay.ZIndex = 2
+DarkOverlay.Parent = Main
+
+local OverlayCorner = Instance.new("UICorner")
+OverlayCorner.CornerRadius = UDim.new(0, 8)
+OverlayCorner.Parent = DarkOverlay
+
+--// LOGO
+local TitleLogo = Instance.new("ImageLabel")
+TitleLogo.Name = "TitleLogo"
+TitleLogo.Size = UDim2.fromOffset(18, 18)
+TitleLogo.Position = UDim2.fromOffset(4, 4)
+TitleLogo.BackgroundTransparency = 1
+TitleLogo.Image = "rbxassetid://10039620127"
+TitleLogo.ScaleType = Enum.ScaleType.Fit
+TitleLogo.ZIndex = 4
+TitleLogo.Parent = Main
+
+local LogoCorner = Instance.new("UICorner")
+LogoCorner.CornerRadius = UDim.new(1, 0)
+LogoCorner.Parent = TitleLogo
+
+--// TÍTULO
+local Title = Instance.new("TextLabel")
+Title.Name = "Title"
+Title.Size = UDim2.fromOffset(105, 20)
+Title.Position = UDim2.fromOffset(26, 3)
+Title.BackgroundTransparency = 1
+Title.Text = "NORLI HUB"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextSize = 12
+Title.Font = Enum.Font.FredokaOne
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.TextYAlignment = Enum.TextYAlignment.Top
+Title.TextStrokeTransparency = 0.45
+Title.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+Title.ZIndex = 4
+Title.Parent = Main
+
+--// BOTÃO X
+local CloseButton = Instance.new("TextButton")
+CloseButton.Name = "CloseButton"
+CloseButton.Size = UDim2.fromOffset(22, 22)
+CloseButton.Position = UDim2.new(1, -27, 0, 2)
+CloseButton.BackgroundTransparency = 1
+CloseButton.Text = "X"
+CloseButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseButton.TextSize = 14
+CloseButton.Font = Enum.Font.FredokaOne
+CloseButton.TextStrokeTransparency = 0.5
+CloseButton.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+CloseButton.AutoButtonColor = false
+CloseButton.ZIndex = 6
+CloseButton.Parent = Main
+
+--// BOTÃO FLUTUANTE
+local FloatingButton = Instance.new("ImageButton")
+FloatingButton.Name = "FloatingButton"
+FloatingButton.Size = UDim2.fromOffset(52, 52)
+FloatingButton.Position = UDim2.new(0.5, -26, 0.75, 0)
+FloatingButton.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+FloatingButton.BackgroundTransparency = 0.08
+FloatingButton.BorderSizePixel = 0
+FloatingButton.Image = "rbxassetid://10039620127"
+FloatingButton.ScaleType = Enum.ScaleType.Fit
+FloatingButton.Visible = false
+FloatingButton.AutoButtonColor = false
+FloatingButton.ZIndex = 20
+FloatingButton.Parent = ScreenGui
+
+local FloatingCorner = Instance.new("UICorner")
+FloatingCorner.CornerRadius = UDim.new(1, 0)
+FloatingCorner.Parent = FloatingButton
+
+local FloatingStroke = Instance.new("UIStroke")
+FloatingStroke.Color = Color3.fromRGB(80, 80, 80)
+FloatingStroke.Thickness = 1
+FloatingStroke.Transparency = 0.25
+FloatingStroke.Parent = FloatingButton
+
+--// ARRASTAR BOTÃO FLUTUANTE
+local dragging = false
+local dragStart
+local startPosition
+local dragInput
+
+local function UpdateDrag(input)
+	local delta = input.Position - dragStart
+
+	FloatingButton.Position = UDim2.new(
+		startPosition.X.Scale,
+		startPosition.X.Offset + delta.X,
+		startPosition.Y.Scale,
+		startPosition.Y.Offset + delta.Y
+	)
+end
+
+FloatingButton.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		dragging = true
+		dragStart = input.Position
+		startPosition = FloatingButton.Position
+
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				dragging = false
+			end
+		end)
+	end
+end)
+
+FloatingButton.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch then
+
+		dragInput = input
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if input == dragInput and dragging then
+		UpdateDrag(input)
+	end
+end)
+
+--// FECHAR / REABRIR
+CloseButton.Activated:Connect(function()
+	Main.Visible = false
+	FloatingButton.Visible = true
+end)
+
+FloatingButton.Activated:Connect(function()
+	Main.Visible = true
+	FloatingButton.Visible = false
+end)
+
+--// ABAS
+local TabsFrame = Instance.new("Frame")
+TabsFrame.Name = "TabsFrame"
+TabsFrame.Size = UDim2.fromOffset(198, 22)
+TabsFrame.Position = UDim2.fromOffset(6, 28)
+TabsFrame.BackgroundTransparency = 1
+TabsFrame.ZIndex = 4
+TabsFrame.Parent = Main
+
+local TabButtons = {}
+local tabNames = {"ESP", "AUTO", "ITEM"}
+
+for index, tabName in ipairs(tabNames) do
+	local tabButton = Instance.new("TextButton")
+	tabButton.Name = tabName .. "Tab"
+	tabButton.Size = UDim2.fromOffset(62, 22)
+	tabButton.Position = UDim2.fromOffset((index - 1) * 68, 0)
+	tabButton.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	tabButton.BorderSizePixel = 0
+	tabButton.Text = tabName
+	tabButton.TextColor3 = Color3.fromRGB(225, 225, 225)
+	tabButton.TextSize = 10
+	tabButton.Font = Enum.Font.FredokaOne
+	tabButton.AutoButtonColor = false
+	tabButton.ZIndex = 5
+	tabButton.Parent = TabsFrame
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = tabButton
+
+	TabButtons[tabName] = tabButton
+end
+
+--// PÁGINAS
+local Pages = {}
+
+local function CreateScrollPage(name)
+	local page = Instance.new("ScrollingFrame")
+	page.Name = name .. "Page"
+	page.Size = UDim2.fromOffset(198, 220)
+	page.Position = UDim2.fromOffset(6, 54)
+	page.BackgroundTransparency = 1
+	page.BorderSizePixel = 0
+	page.ScrollBarThickness = 4
+	page.ScrollBarImageColor3 = Color3.fromRGB(90, 90, 90)
+	page.ScrollingDirection = Enum.ScrollingDirection.Y
+	page.Visible = false
+	page.ZIndex = 4
+	page.Parent = Main
+
+	return page
+end
+
+Pages.ESP = CreateScrollPage("ESP")
+Pages.ESP.CanvasSize = UDim2.new(1, 0, 0, 150)
+
+Pages.ITEM = CreateScrollPage("ITEM")
+Pages.ITEM.CanvasSize = UDim2.new(1, 0, 0, 230)
+
+Pages.AUTO = Instance.new("Frame")
+Pages.AUTO.Name = "AUTOPage"
+Pages.AUTO.Size = UDim2.fromOffset(198, 220)
+Pages.AUTO.Position = UDim2.fromOffset(6, 54)
+Pages.AUTO.BackgroundTransparency = 1
+Pages.AUTO.Visible = false
+Pages.AUTO.ZIndex = 4
+Pages.AUTO.Parent = Main
+
+local CurrentPage = "ESP"
+
+local function SwitchPage(name)
+	CurrentPage = name
+
+	for pageName, page in pairs(Pages) do
+		page.Visible = pageName == name
+	end
+
+	for tabName, tabButton in pairs(TabButtons) do
+		if tabName == name then
+			tabButton.BackgroundColor3 = Color3.fromRGB(60, 210, 100)
+			tabButton.TextColor3 = Color3.fromRGB(0, 0, 0)
+		else
+			tabButton.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+			tabButton.TextColor3 = Color3.fromRGB(225, 225, 225)
+		end
+	end
+end
+
+for tabName, tabButton in pairs(TabButtons) do
+	tabButton.Activated:Connect(function()
+		SwitchPage(tabName)
+	end)
+end
+
+--// FUNÇÃO TOGGLE
+local function CreateToggle(parent, name, yPosition, stateKey)
+	local Button = Instance.new("TextButton")
+	Button.Name = name .. "Toggle"
+	Button.Size = UDim2.fromOffset(42, 24)
+	Button.Position = UDim2.fromOffset(12, yPosition)
+	Button.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	Button.BorderSizePixel = 0
+	Button.Text = ""
+	Button.AutoButtonColor = false
+	Button.ZIndex = 5
+	Button.Parent = parent
+
+	local ButtonCorner = Instance.new("UICorner")
+	ButtonCorner.CornerRadius = UDim.new(0, 6)
+	ButtonCorner.Parent = Button
+
+	local Indicator = Instance.new("Frame")
+	Indicator.Name = "Indicator"
+	Indicator.Size = UDim2.fromOffset(18, 18)
+	Indicator.Position = UDim2.fromOffset(3, 3)
+	Indicator.BackgroundColor3 = Color3.fromRGB(220, 55, 55)
+	Indicator.BorderSizePixel = 0
+	Indicator.ZIndex = 6
+	Indicator.Parent = Button
+
+	local IndicatorCorner = Instance.new("UICorner")
+	IndicatorCorner.CornerRadius = UDim.new(0, 4)
+	IndicatorCorner.Parent = Indicator
+
+	local Glow = Instance.new("UIStroke")
+	Glow.Name = "Glow"
+	Glow.Thickness = 1
+	Glow.Transparency = 0.35
+	Glow.Color = Color3.fromRGB(220, 55, 55)
+	Glow.Parent = Indicator
+
+	local Label = Instance.new("TextLabel")
+	Label.Name = name .. "Label"
+	Label.Size = UDim2.fromOffset(125, 20)
+	Label.Position = UDim2.fromOffset(62, yPosition + 2)
+	Label.BackgroundTransparency = 1
+	Label.Text = name
+	Label.TextColor3 = Color3.fromRGB(225, 225, 225)
+	Label.TextSize = 11
+	Label.Font = Enum.Font.FredokaOne
+	Label.TextXAlignment = Enum.TextXAlignment.Left
+	Label.TextYAlignment = Enum.TextYAlignment.Center
+	Label.TextWrapped = false
+	Label.ZIndex = 5
+	Label.Parent = parent
+
+	local Enabled = false
+
+	Button.MouseButton1Click:Connect(function()
+		Enabled = not Enabled
+		ESPStates[stateKey] = Enabled
+
+		local position
+		local color
+
+		if Enabled then
+			position = UDim2.new(1, -21, 0, 3)
+			color = Color3.fromRGB(60, 210, 100)
+		else
+			position = UDim2.fromOffset(3, 3)
+			color = Color3.fromRGB(220, 55, 55)
+		end
+
+		TweenService:Create(
+			Indicator,
+			TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{
+				Position = position,
+				BackgroundColor3 = color
+			}
+		):Play()
+
+		TweenService:Create(
+			Glow,
+			TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			{
+				Color = color
+			}
+		):Play()
+
+		task.spawn(SyncESP)
+	end)
+end
+
+--// TOGGLES ESP
+CreateToggle(Pages.ESP, "ESP KILLERS", 8, "KILLERS")
+CreateToggle(Pages.ESP, "ESP SURVIVORS", 41, "SURVIVORS")
+CreateToggle(Pages.ESP, "ESP SPECTATORS", 74, "SPECTATORS")
+CreateToggle(Pages.ESP, "ESP GENERATORS", 107, "GENERATORS")
+
+--// AUTO PAGE
+local AutoLabel = Instance.new("TextLabel")
+AutoLabel.Name = "AutoLabel"
+AutoLabel.Size = UDim2.fromOffset(186, 100)
+AutoLabel.Position = UDim2.fromOffset(6, 25)
+AutoLabel.BackgroundTransparency = 1
+AutoLabel.Text = "não temos funções por enquanto nessa página"
+AutoLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+AutoLabel.TextSize = 11
+AutoLabel.Font = Enum.Font.FredokaOne
+AutoLabel.TextWrapped = true
+AutoLabel.ZIndex = 5
+AutoLabel.Parent = Pages.AUTO
+
+--// ITEM PAGE
+local ItemTitle = Instance.new("TextLabel")
+ItemTitle.Name = "ItemTitle"
+ItemTitle.Size = UDim2.fromOffset(186, 18)
+ItemTitle.Position = UDim2.fromOffset(12, 6)
+ItemTitle.BackgroundTransparency = 1
+ItemTitle.Text = "ITEM GRABBER"
+ItemTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+ItemTitle.TextSize = 11
+ItemTitle.Font = Enum.Font.FredokaOne
+ItemTitle.TextXAlignment = Enum.TextXAlignment.Left
+ItemTitle.TextStrokeTransparency = 0.6
+ItemTitle.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+ItemTitle.ZIndex = 5
+ItemTitle.Parent = Pages.ITEM
+
+local DropdownButton = Instance.new("TextButton")
+DropdownButton.Name = "DropdownButton"
+DropdownButton.Size = UDim2.fromOffset(186, 26)
+DropdownButton.Position = UDim2.fromOffset(12, 30)
+DropdownButton.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+DropdownButton.BorderSizePixel = 0
+DropdownButton.Text = "SELECIONAR ITEM"
+DropdownButton.TextColor3 = Color3.fromRGB(225, 225, 225)
+DropdownButton.TextSize = 10
+DropdownButton.Font = Enum.Font.FredokaOne
+DropdownButton.AutoButtonColor = false
+DropdownButton.ZIndex = 5
+DropdownButton.Parent = Pages.ITEM
+
+local DropdownCorner = Instance.new("UICorner")
+DropdownCorner.CornerRadius = UDim.new(0, 6)
+DropdownCorner.Parent = DropdownButton
+
+local DropdownStroke = Instance.new("UIStroke")
+DropdownStroke.Color = Color3.fromRGB(80, 80, 80)
+DropdownStroke.Thickness = 1
+DropdownStroke.Transparency = 0.45
+DropdownStroke.Parent = DropdownButton
+
+local DropdownList = Instance.new("Frame")
+DropdownList.Name = "DropdownList"
+DropdownList.Size = UDim2.fromOffset(186, 58)
+DropdownList.Position = UDim2.fromOffset(12, 60)
+DropdownList.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+DropdownList.BackgroundTransparency = 0.15
+DropdownList.BorderSizePixel = 0
+DropdownList.Visible = false
+DropdownList.ZIndex = 6
+DropdownList.Parent = Pages.ITEM
+
+local DropdownListCorner = Instance.new("UICorner")
+DropdownListCorner.CornerRadius = UDim.new(0, 6)
+DropdownListCorner.Parent = DropdownList
+
+local DropdownListStroke = Instance.new("UIStroke")
+DropdownListStroke.Color = Color3.fromRGB(80, 80, 80)
+DropdownListStroke.Thickness = 1
+DropdownListStroke.Transparency = 0.45
+DropdownListStroke.Parent = DropdownList
+
+local ItemOptionButtons = {}
+
+local function CreateOptionButton(config, yPosition)
+	local optionButton = Instance.new("TextButton")
+	optionButton.Name = config.Key .. "Option"
+	optionButton.Size = UDim2.fromOffset(178, 24)
+	optionButton.Position = UDim2.fromOffset(4, yPosition)
+	optionButton.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+	optionButton.BorderSizePixel = 0
+	optionButton.Text = config.Display
+	optionButton.TextColor3 = Color3.fromRGB(225, 225, 225)
+	optionButton.TextSize = 10
+	optionButton.Font = Enum.Font.FredokaOne
+	optionButton.AutoButtonColor = false
+	optionButton.ZIndex = 7
+	optionButton.Parent = DropdownList
+
+	local optionCorner = Instance.new("UICorner")
+	optionCorner.CornerRadius = UDim.new(0, 6)
+	optionCorner.Parent = optionButton
+
+	return optionButton
+end
+
+ItemOptionButtons.MEDKIT = CreateOptionButton(GetItemConfig("MEDKIT"), 4)
+ItemOptionButtons.BLOXYCOLA = CreateOptionButton(GetItemConfig("BLOXYCOLA"), 30)
+
+local GrabButton = Instance.new("TextButton")
+GrabButton.Name = "GrabButton"
+GrabButton.Size = UDim2.fromOffset(186, 28)
+GrabButton.Position = UDim2.fromOffset(12, 126)
+GrabButton.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+GrabButton.BorderSizePixel = 0
+GrabButton.Text = "PEGAR ITEM"
+GrabButton.TextColor3 = Color3.fromRGB(150, 150, 150)
+GrabButton.TextSize = 11
+GrabButton.Font = Enum.Font.FredokaOne
+GrabButton.AutoButtonColor = false
+GrabButton.ZIndex = 5
+GrabButton.Parent = Pages.ITEM
+
+local GrabCorner = Instance.new("UICorner")
+GrabCorner.CornerRadius = UDim.new(0, 6)
+GrabCorner.Parent = GrabButton
+
+local GrabStroke = Instance.new("UIStroke")
+GrabStroke.Color = Color3.fromRGB(80, 80, 80)
+GrabStroke.Thickness = 1
+GrabStroke.Transparency = 0.45
+GrabStroke.Parent = GrabButton
+
+local ItemStatus = Instance.new("TextLabel")
+ItemStatus.Name = "ItemStatus"
+ItemStatus.Size = UDim2.fromOffset(186, 45)
+ItemStatus.Position = UDim2.fromOffset(12, 160)
+ItemStatus.BackgroundTransparency = 1
+ItemStatus.Text = ""
+ItemStatus.TextColor3 = Color3.fromRGB(255, 255, 255)
+ItemStatus.TextSize = 9
+ItemStatus.Font = Enum.Font.FredokaOne
+ItemStatus.TextXAlignment = Enum.TextXAlignment.Center
+ItemStatus.TextYAlignment = Enum.TextYAlignment.Top
+ItemStatus.TextWrapped = true
+ItemStatus.ZIndex = 5
+ItemStatus.Parent = Pages.ITEM
+
+--// STATUS / NOTIFY
+local SelectedItemKey = nil
+local DropdownOpen = false
+local NotifyToken = 0
+
+local function Notify(message, color)
+	if not ItemStatus then
+		return
+	end
+
+	NotifyToken = NotifyToken + 1
+	local token = NotifyToken
+
+	ItemStatus.Text = message
+	ItemStatus.TextColor3 = color or Color3.fromRGB(255, 255, 255)
+
+	task.delay(2.5, function()
+		if token == NotifyToken then
+			ItemStatus.Text = ""
+		end
+	end)
+end
+
+--// ATUALIZAR ITEM UI
+local function UpdateDropdownButton()
+	local config = SelectedItemKey and GetItemConfig(SelectedItemKey)
+
+	if config then
+		local item = GetCachedItem(SelectedItemKey)
+		DropdownButton.Text = "ITEM: " .. config.Display .. (item and "" or " (não encontrado)")
+	else
+		DropdownButton.Text = "SELECIONAR ITEM"
+	end
+
+	DropdownButton.Text = DropdownButton.Text .. (DropdownOpen and "  [-]" or "  [+]")
+end
+
+local function UpdateOptions()
+	for _, config in ipairs(ItemConfigs) do
+		local button = ItemOptionButtons[config.Key]
+
+		if button then
+			local item = GetCachedItem(config.Key)
+			local available = item ~= nil
+
+			button.Text = config.Display .. (available and "" or " (não encontrado)")
+
+			if available then
+				button.TextColor3 = Color3.fromRGB(225, 225, 225)
+			else
+				button.TextColor3 = Color3.fromRGB(110, 110, 110)
+			end
+
+			if SelectedItemKey == config.Key and available then
+				button.BackgroundColor3 = Color3.fromRGB(60, 210, 100)
+				button.TextColor3 = Color3.fromRGB(0, 0, 0)
+			else
+				button.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+			end
+		end
+	end
+end
+
+local function UpdateGrabButton()
+	local available = SelectedItemKey and GetCachedItem(SelectedItemKey) ~= nil
+
+	if available then
+		GrabButton.BackgroundColor3 = Color3.fromRGB(60, 210, 100)
+		GrabButton.TextColor3 = Color3.fromRGB(0, 0, 0)
+	else
+		GrabButton.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+		GrabButton.TextColor3 = Color3.fromRGB(150, 150, 150)
+	end
+end
+
+local function UpdateItemUI()
+	UpdateDropdownButton()
+	UpdateOptions()
+	UpdateGrabButton()
+end
+
+--// EVENTOS ITEM
+DropdownButton.Activated:Connect(function()
+	DropdownOpen = not DropdownOpen
+	DropdownList.Visible = DropdownOpen
+
+	if DropdownOpen then
+		for _, config in ipairs(ItemConfigs) do
+			RefreshItem(config.Key, false)
+		end
+	end
+
+	UpdateItemUI()
+end)
+
+for _, config in ipairs(ItemConfigs) do
+	local button = ItemOptionButtons[config.Key]
+
+	button.Activated:Connect(function()
+		local item = RefreshItem(config.Key, true)
+
+		if not item then
+			Notify("Item não encontrado no mapa.", Color3.fromRGB(255, 90, 90))
+			return
+		end
+
+		SelectedItemKey = config.Key
+		DropdownOpen = false
+		DropdownList.Visible = false
+
+		UpdateItemUI()
+	end)
+end
+
+GrabButton.Activated:Connect(function()
+	if not SelectedItemKey then
+		Notify("Selecione um item primeiro.", Color3.fromRGB(255, 220, 80))
+		return
+	end
+
+	local item = RefreshItem(SelectedItemKey, true)
+
+	if not item then
+		Notify("Item não encontrado.", Color3.fromRGB(255, 90, 90))
+		UpdateItemUI()
+		return
+	end
+
+	local ok, errorMessage = MoveInstanceToPlayer(item)
+
+	if ok then
+		Notify("Item teleportado!", Color3.fromRGB(60, 210, 100))
+	else
+		Notify("Falha: " .. tostring(errorMessage), Color3.fromRGB(255, 90, 90))
+	end
+
+	UpdateItemUI()
+end)
+
+--// INICIALIZAÇÃO
+SwitchPage("ESP")
+
+for _, config in ipairs(ItemConfigs) do
+	RefreshItem(config.Key, true)
+end
+
+UpdateItemUI()
+
+--// LOOP ESP PERMANENTE
+task.spawn(function()
+	while true do
+		pcall(SyncESP)
+		task.wait(1)
+	end
+end)
+
+--// LOOP ITEM
+task.spawn(function()
+	while true do
+		task.wait(2)
+
+		pcall(function()
+			for _, config in ipairs(ItemConfigs) do
+				RefreshItem(config.Key, false)
+			end
+
+			UpdateItemUI()
+		end)
+	end
+end)
