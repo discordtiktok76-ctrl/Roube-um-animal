@@ -1,0 +1,3580 @@
+--[[
+NORLI GUI STUDIO V4 PRO
+Editor de interfaces Roblox feito para celular.
+Rodar em jogo próprio e vazio.
+
+DIFERENÇAS DA V4 PRO:
+• Interface mais profissional
+• Undo/redo por snapshot
+• Alinhamento automático
+• Modelos prontos
+• Preview da interface
+• Salvar/carregar projeto em JSON
+• Exportação Lua melhorada
+• Mais controles no inspector
+• Melhor usabilidade mobile
+]]
+
+--// Services ---------------------------------------------------------------
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local StarterGui       = game:GetService("StarterGui")
+local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
+
+local player = Players.LocalPlayer
+if not player then return end
+local playerGui = player:WaitForChild("PlayerGui")
+
+--// Rerun-safe cleanup -------------------------------------------------------
+local oldGui = playerGui:FindFirstChild("NORLI_GUI_STUDIO_V4")
+if oldGui then
+	pcall(function() oldGui:Destroy() end)
+end
+
+--// Helpers -----------------------------------------------------------------
+local function safeGet(obj, prop)
+	local ok, value = pcall(function() return obj[prop] end)
+	return ok and value or nil
+end
+
+local function safeSet(obj, prop, value)
+	return pcall(function() obj[prop] = value end)
+end
+
+local function clamp(n, a, b)
+	return math.max(a, math.min(b, n))
+end
+
+local function round(n)
+	return math.floor(n + 0.5)
+end
+
+local function clearTable(t)
+	for k in pairs(t) do t[k] = nil end
+end
+
+local function splitEnumString(str)
+	local enumType, enumName = string.match(tostring(str), "^Enum%.([%w_]+)%.([%w_]+)$")
+	return enumType, enumName
+end
+
+local function getExecutorEnv()
+	if type(getgenv) == "function" then
+		local ok, env = pcall(getgenv)
+		if ok and type(env) == "table" then return env end
+	end
+	return _G
+end
+
+local function safeClipboard(text)
+	local env = getExecutorEnv()
+	for _, name in ipairs({"setclipboard", "toclipboard", "set_clipboard"}) do
+		local fn = rawget(env, name)
+		if type(fn) == "function" then
+			local ok = pcall(fn, text)
+			if ok then return true end
+		end
+	end
+	return false
+end
+
+local function getRequestFunction()
+	local env = getExecutorEnv()
+	for _, name in ipairs({"request", "http_request", "syn_request"}) do
+		local fn = rawget(env, name)
+		if type(fn) == "function" then return fn end
+	end
+	return nil
+end
+
+local function urlEncode(s)
+	s = tostring(s or "")
+	return s:gsub("([^%w%-_%.~])", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end)
+end
+
+local function make(className, props, parent)
+	local ok, obj = pcall(Instance.new, className)
+	if not ok or not obj then return nil end
+	for k, v in pairs(props or {}) do
+		pcall(function() obj[k] = v end)
+	end
+	if parent then obj.Parent = parent end
+	return obj
+end
+
+local function tween(obj, props, duration)
+	if not obj then return end
+	local ok, info = pcall(TweenInfo.new, duration or 0.13, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+	if not ok then return end
+	local ok2, tw = pcall(function() return TweenService:Create(obj, info, props) end)
+	if ok2 and tw then tw:Play() end
+end
+
+local function corner(obj, radius)
+	if not obj then return end
+	local c = obj:FindFirstChild("NORLI_Corner") or obj:FindFirstChildOfClass("UICorner")
+	if not c then
+		c = Instance.new("UICorner")
+		c.Name = "NORLI_Corner"
+		c.Parent = obj
+	end
+	c.CornerRadius = UDim.new(0, radius or 10)
+	return c
+end
+
+local function getStroke(obj)
+	if not obj then return nil end
+	return obj:FindFirstChild("NORLI_Stroke") or obj:FindFirstChildOfClass("UIStroke")
+end
+
+local function ensureStroke(obj)
+	if not obj then return nil end
+	local s = getStroke(obj)
+	if not s then
+		s = Instance.new("UIStroke")
+		s.Name = "NORLI_Stroke"
+		s.Parent = obj
+	end
+	return s
+end
+
+local function removeUiStroke(obj)
+	local s = getStroke(obj)
+	if s and s.Name ~= "NORLI_Selection" then
+		pcall(function() s:Destroy() end)
+	end
+end
+
+local function newId()
+	local ok, guid = pcall(function() return HttpService:GenerateGUID(false) end)
+	if ok and guid then
+		return tostring(guid):gsub("-", "")
+	end
+	return "ID" .. tostring(math.random(100000, 999999)) .. tostring(os.clock()):gsub("%.", "")
+end
+
+--// Core GUI cleanup --------------------------------------------------------
+local coreGuiTypes = {
+	Enum.CoreGuiType.Backpack,
+	Enum.CoreGuiType.PlayerList,
+	Enum.CoreGuiType.Health,
+	Enum.CoreGuiType.Chat,
+	Enum.CoreGuiType.EmotesMenu,
+	Enum.CoreGuiType.Captures,
+	Enum.CoreGuiType.SelfView,
+}
+
+local previousCoreGui = {}
+for _, typeValue in ipairs(coreGuiTypes) do
+	local ok, value = pcall(function() return StarterGui:GetCoreGuiEnabled(typeValue) end)
+	if ok then previousCoreGui[typeValue] = value end
+	pcall(function() StarterGui:SetCoreGuiEnabled(typeValue, false) end)
+end
+
+local function restoreCoreGui()
+	for typeValue, wasEnabled in pairs(previousCoreGui) do
+		pcall(function() StarterGui:SetCoreGuiEnabled(typeValue, wasEnabled) end)
+	end
+end
+
+local function cleanLocalTools()
+	local backpack = player:FindFirstChildOfClass("Backpack")
+	if backpack then
+		for _, obj in ipairs(backpack:GetChildren()) do
+			if obj:IsA("Tool") then pcall(function() obj:Destroy() end) end
+		end
+	end
+	local character = player.Character
+	if character then
+		for _, obj in ipairs(character:GetChildren()) do
+			if obj:IsA("Tool") then pcall(function() obj:Destroy() end) end
+		end
+	end
+end
+cleanLocalTools()
+
+--// Theme -------------------------------------------------------------------
+local C = {
+	bg = Color3.fromRGB(8, 10, 14),
+	surface = Color3.fromRGB(16, 19, 26),
+	surface2 = Color3.fromRGB(22, 26, 35),
+	card = Color3.fromRGB(28, 33, 44),
+	card2 = Color3.fromRGB(35, 41, 54),
+	accent = Color3.fromRGB(94, 142, 255),
+	accent2 = Color3.fromRGB(69, 108, 228),
+	green = Color3.fromRGB(77, 214, 129),
+	red = Color3.fromRGB(240, 82, 98),
+	amber = Color3.fromRGB(242, 179, 72),
+	text = Color3.fromRGB(245, 247, 251),
+	muted = Color3.fromRGB(154, 164, 182),
+	line = Color3.fromRGB(54, 62, 78),
+	canvas = Color3.fromRGB(12, 15, 21),
+}
+
+local Palette = {
+	Color3.fromRGB(255,255,255), Color3.fromRGB(235,237,243), Color3.fromRGB(205,210,220),
+	Color3.fromRGB(160,168,180), Color3.fromRGB(98,105,118), Color3.fromRGB(42,46,56),
+	Color3.fromRGB(0,0,0), Color3.fromRGB(236,72,86), Color3.fromRGB(255,116,116),
+	Color3.fromRGB(255,162,84), Color3.fromRGB(255,210,88), Color3.fromRGB(166,226,88),
+	Color3.fromRGB(78,206,116), Color3.fromRGB(70,214,172), Color3.fromRGB(72,196,232),
+	Color3.fromRGB(84,152,240), Color3.fromRGB(106,122,255), Color3.fromRGB(154,106,255),
+	Color3.fromRGB(214,92,236), Color3.fromRGB(248,98,168), Color3.fromRGB(134,90,66),
+	Color3.fromRGB(172,116,80), Color3.fromRGB(200,150,112), Color3.fromRGB(236,190,152),
+	Color3.fromRGB(255,238,202), Color3.fromRGB(200,92,74), Color3.fromRGB(154,58,58),
+	Color3.fromRGB(104,66,166), Color3.fromRGB(72,78,160), Color3.fromRGB(60,118,178),
+	Color3.fromRGB(52,144,150), Color3.fromRGB(58,158,98), Color3.fromRGB(114,178,70),
+	Color3.fromRGB(172,190,64), Color3.fromRGB(206,196,58), Color3.fromRGB(244,214,66),
+}
+
+--// State -------------------------------------------------------------------
+local selected = nil
+local selectionVisual = nil
+local currentTab = nil
+local panel, panelBody, panelBackdrop = nil, nil, nil
+
+local refreshProperties = function() end
+local refreshLayers = function() end
+
+local openTab = nil
+local clearPanelVisual = nil
+local closePanel = nil
+local updateTabColors = nil
+
+local beginDrag, beginResize, beginRotate
+local connectSelectable, prepareTree
+local doUndo, doRedo
+local openPreview
+
+local snapEnabled = false
+local gridSizes = {4, 8, 16, 24, 32}
+local gridIndex = 2
+local gridSize = gridSizes[gridIndex]
+
+local colorTarget = "BackgroundColor3"
+local recentClasses = {}
+local recentAssets = {}
+local tabButtons = {}
+local restoring = false
+local suppressHistory = false
+local previewGui = nil
+
+local EDITOR_TOKEN = newId()
+
+--// Root --------------------------------------------------------------------
+local Gui = make("ScreenGui", {
+	Name = "NORLI_GUI_STUDIO_V4",
+	IgnoreGuiInset = true,
+	ResetOnSpawn = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 1000000,
+}, playerGui)
+
+if not Gui then return end
+Gui.Destroying:Connect(restoreCoreGui)
+
+local Root = make("Frame", {
+	Name = "Root",
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = C.bg,
+	BorderSizePixel = 0,
+}, Gui)
+
+--// Header ------------------------------------------------------------------
+local HEADER_H = 56
+local TOOLBAR_H = 36
+local TABBAR_H = 60
+
+local Header = make("Frame", {
+	Size = UDim2.new(1, 0, 0, HEADER_H),
+	BackgroundColor3 = C.surface,
+	BorderSizePixel = 0,
+	ZIndex = 10,
+}, Root)
+
+local HeaderStroke = ensureStroke(Header)
+HeaderStroke.Transparency = 0.55
+HeaderStroke.Thickness = 1
+HeaderStroke.Color = C.line
+
+local Brand = make("TextLabel", {
+	Size = UDim2.new(1, -275, 0, 25),
+	Position = UDim2.new(0, 14, 0, 7),
+	BackgroundTransparency = 1,
+	Text = "NORLI GUI STUDIO V4 PRO",
+	Font = Enum.Font.GothamBold,
+	TextSize = 15,
+	TextColor3 = C.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 11,
+}, Header)
+
+local Status = make("TextLabel", {
+	Size = UDim2.new(1, -275, 0, 17),
+	Position = UDim2.new(0, 14, 0, 32),
+	BackgroundTransparency = 1,
+	Text = "MOBILE • PRO • PRONTO",
+	Font = Enum.Font.GothamMedium,
+	TextSize = 9,
+	TextColor3 = C.muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	ZIndex = 11,
+}, Header)
+
+local RestoreButton = make("TextButton", {
+	Size = UDim2.fromOffset(92, 34),
+	Position = UDim2.new(1, -260, 0, 11),
+	BackgroundColor3 = C.card,
+	BorderSizePixel = 0,
+	AutoButtonColor = false,
+	Text = "↺ UI ROBLOX",
+	Font = Enum.Font.GothamBold,
+	TextSize = 9,
+	TextColor3 = C.muted,
+	ZIndex = 11,
+}, Header)
+corner(RestoreButton, 9)
+
+local PreviewButton = make("TextButton", {
+	Size = UDim2.fromOffset(64, 34),
+	Position = UDim2.new(1, -162, 0, 11),
+	BackgroundColor3 = C.accent2,
+	BorderSizePixel = 0,
+	AutoButtonColor = false,
+	Text = "▶ PREVIEW",
+	Font = Enum.Font.GothamBold,
+	TextSize = 9,
+	TextColor3 = Color3.new(1, 1, 1),
+	ZIndex = 11,
+}, Header)
+corner(PreviewButton, 9)
+
+local CloseButton = make("TextButton", {
+	Size = UDim2.fromOffset(80, 34),
+	Position = UDim2.new(1, -92, 0, 11),
+	BackgroundColor3 = C.red,
+	BorderSizePixel = 0,
+	AutoButtonColor = false,
+	Text = "✕ FECHAR",
+	Font = Enum.Font.GothamBold,
+	TextSize = 9,
+	TextColor3 = Color3.new(1, 1, 1),
+	ZIndex = 11,
+}, Header)
+corner(CloseButton, 9)
+
+RestoreButton.Activated:Connect(function()
+	restoreCoreGui()
+end)
+
+PreviewButton.Activated:Connect(function()
+	if openPreview then openPreview() end
+end)
+
+CloseButton.Activated:Connect(function()
+	Gui:Destroy()
+end)
+
+--// Toast -------------------------------------------------------------------
+local Toast = make("TextLabel", {
+	Size = UDim2.new(0, 280, 0, 38),
+	Position = UDim2.new(0.5, 0, 1, -118),
+	AnchorPoint = Vector2.new(0.5, 0),
+	BackgroundColor3 = C.card,
+	BorderSizePixel = 0,
+	Text = "",
+	Font = Enum.Font.GothamBold,
+	TextSize = 10,
+	TextColor3 = C.text,
+	TextWrapped = true,
+	Visible = false,
+	ZIndex = 300,
+}, Root)
+corner(Toast, 10)
+
+local toastToken = 0
+local function toast(message, color)
+	toastToken += 1
+	local token = toastToken
+
+	Toast.Text = tostring(message or "")
+	Toast.BackgroundColor3 = color or C.card
+	Toast.Visible = true
+	Toast.Position = UDim2.new(0.5, 0, 1, -106)
+	tween(Toast, {Position = UDim2.new(0.5, 0, 1, -120)}, 0.12)
+
+	task.delay(1.7, function()
+		if token ~= toastToken then return end
+		tween(Toast, {Position = UDim2.new(0.5, 0, 1, -92)}, 0.12)
+		task.delay(0.14, function()
+			if token == toastToken then Toast.Visible = false end
+		end)
+	end)
+end
+
+--// Canvas ------------------------------------------------------------------
+local CanvasHolder = make("Frame", {
+	Size = UDim2.new(1, 0, 1, -(HEADER_H + TOOLBAR_H + TABBAR_H)),
+	Position = UDim2.new(0, 0, 0, HEADER_H + TOOLBAR_H),
+	BackgroundColor3 = C.canvas,
+	BorderSizePixel = 0,
+	ClipsDescendants = true,
+	Active = true,
+}, Root)
+
+local Canvas = make("Frame", {
+	Size = UDim2.new(1, -22, 1, -22),
+	Position = UDim2.new(0, 11, 0, 11),
+	BackgroundColor3 = Color3.fromRGB(17, 20, 28),
+	BorderSizePixel = 0,
+	ClipsDescendants = true,
+	Active = true,
+}, CanvasHolder)
+corner(Canvas, 14)
+
+local CanvasStroke = ensureStroke(Canvas)
+CanvasStroke.Color = C.line
+CanvasStroke.Transparency = 0.42
+
+local Grid = make("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Active = false,
+	ZIndex = 1,
+}, Canvas)
+
+local DesignRoot = make("Frame", {
+	Name = "DesignRoot",
+	Size = UDim2.new(1, -20, 1, -20),
+	Position = UDim2.new(0, 10, 0, 10),
+	BackgroundColor3 = Color3.fromRGB(15, 18, 25),
+	BorderSizePixel = 0,
+	ClipsDescendants = true,
+	Active = true,
+	ZIndex = 3,
+}, Canvas)
+corner(DesignRoot, 11)
+
+local ZoomScale = make("UIScale", {
+	Name = "NORLI_Zoom",
+	Scale = 1,
+}, DesignRoot)
+
+local basePosition = DesignRoot.Position
+
+local EmptyHint = make("TextLabel", {
+	Size = UDim2.new(1, -40, 0, 82),
+	Position = UDim2.new(0, 20, 0.5, -41),
+	BackgroundTransparency = 1,
+	Text = "CANVAS VAZIO\n\nAbra OBJETOS para criar elementos\nou MODELOS para criar telas prontas.",
+	Font = Enum.Font.GothamMedium,
+	TextSize = 12,
+	TextColor3 = C.muted,
+	TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Center,
+	TextYAlignment = Enum.TextYAlignment.Center,
+	ZIndex = 3,
+}, DesignRoot)
+
+local SafeOverlay = make("Frame", {
+	Size = UDim2.new(1, -26, 1, -26),
+	Position = UDim2.new(0, 13, 0, 13),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Visible = false,
+	Active = false,
+	ZIndex = 6,
+}, Canvas)
+local SafeStroke = ensureStroke(SafeOverlay)
+SafeStroke.Color = C.amber
+SafeStroke.Thickness = 1.5
+SafeStroke.Transparency = 0.15
+
+local function buildGrid()
+	for _, child in ipairs(Grid:GetChildren()) do
+		child:Destroy()
+	end
+
+	for i = 1, 7 do
+		make("Frame", {
+			Size = UDim2.new(0, 1, 1, 0),
+			Position = UDim2.new(i / 8, 0, 0, 0),
+			BackgroundColor3 = C.line,
+			BackgroundTransparency = 0.88,
+			BorderSizePixel = 0,
+			ZIndex = 2,
+		}, Grid)
+	end
+
+	for i = 1, 5 do
+		make("Frame", {
+			Size = UDim2.new(1, 0, 0, 1),
+			Position = UDim2.new(0, 0, i / 6, 0),
+			BackgroundColor3 = C.line,
+			BackgroundTransparency = 0.88,
+			BorderSizePixel = 0,
+			ZIndex = 2,
+		}, Grid)
+	end
+end
+buildGrid()
+
+--// Utility object checks ----------------------------------------------------
+local function isUserElement(obj)
+	return obj ~= nil
+		and obj:IsA("GuiObject")
+		and obj ~= EmptyHint
+		and obj.Name ~= "NORLI_Selection"
+end
+
+local function isSelectable(obj)
+	return obj ~= nil
+		and obj:IsA("GuiObject")
+		and obj:IsDescendantOf(DesignRoot)
+		and obj ~= DesignRoot
+		and obj ~= EmptyHint
+		and obj.Name ~= "NORLI_Selection"
+end
+
+local function isLocked(obj)
+	return obj ~= nil and obj:GetAttribute("NORLI_Locked") == true
+end
+
+local function updateEmpty()
+	local count = 0
+	for _, child in ipairs(DesignRoot:GetChildren()) do
+		if isUserElement(child) then count += 1 end
+	end
+	EmptyHint.Visible = count == 0
+end
+
+local function findObjectById(id)
+	if not id then return nil end
+	for _, descendant in ipairs(DesignRoot:GetDescendants()) do
+		if descendant:IsA("GuiObject") and descendant:GetAttribute("NORLI_ID") == id then
+			return descendant
+		end
+	end
+	return nil
+end
+
+local function removeEditorHelpersRecursive(obj)
+	if not obj then return end
+	local destroyList = {}
+	for _, descendant in ipairs(obj:GetDescendants()) do
+		if descendant.Name == "NORLI_Selection" then
+			table.insert(destroyList, descendant)
+		end
+	end
+	for _, item in ipairs(destroyList) do
+		pcall(function() item:Destroy() end)
+	end
+end
+
+local function ensureId(obj)
+	if obj and obj:IsA("GuiObject") and not obj:GetAttribute("NORLI_ID") then
+		obj:SetAttribute("NORLI_ID", newId())
+	end
+end
+
+local function ensureTreeIds(root, forceNew)
+	local function assign(obj)
+		if obj:IsA("GuiObject") then
+			if forceNew or not obj:GetAttribute("NORLI_ID") then
+				obj:SetAttribute("NORLI_ID", newId())
+			end
+		end
+	end
+
+	if root then assign(root) end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		assign(descendant)
+	end
+end
+
+--// Selection visual --------------------------------------------------------
+local function removeSelectionVisual()
+	if selectionVisual then
+		pcall(function() selectionVisual:Destroy() end)
+		selectionVisual = nil
+	end
+end
+
+local function makeHandle(parent, text, position, color, callback)
+	local handle = make("TextButton", {
+		Name = "NORLI_Selection",
+		Size = UDim2.fromOffset(28, 28),
+		Position = position,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = color,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = Color3.new(1, 1, 1),
+		Active = true,
+		ZIndex = 1200,
+	}, parent)
+	corner(handle, 14)
+
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			callback(input)
+		end
+	end)
+
+	return handle
+end
+
+local function showSelectionVisual()
+	removeSelectionVisual()
+	if not selected or not isSelectable(selected) then return end
+
+	selectionVisual = make("Frame", {
+		Name = "NORLI_Selection",
+		Size = UDim2.new(1, 10, 1, 10),
+		Position = UDim2.new(0, -5, 0, -5),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Active = false,
+		ZIndex = math.max(1000, selected.ZIndex + 100),
+	}, selected)
+
+	local stroke = ensureStroke(selectionVisual)
+	stroke.Name = "NORLI_Selection"
+	stroke.Color = C.accent
+	stroke.Thickness = 2
+	stroke.Transparency = 0
+
+	if isLocked(selected) then return end
+
+	makeHandle(selectionVisual, "◢", UDim2.new(1, -10, 1, -10), C.accent, function(input)
+		beginResize(selected, input, 1, 1)
+	end)
+
+	makeHandle(selectionVisual, "◤", UDim2.new(0, 10, 0, 10), C.accent, function(input)
+		beginResize(selected, input, -1, -1)
+	end)
+
+	makeHandle(selectionVisual, "◥", UDim2.new(1, -10, 0, 10), C.accent, function(input)
+		beginResize(selected, input, 1, -1)
+	end)
+
+	makeHandle(selectionVisual, "◣", UDim2.new(0, 10, 1, -10), C.accent, function(input)
+		beginResize(selected, input, -1, 1)
+	end)
+
+	makeHandle(selectionVisual, "↻", UDim2.new(0.5, 0, 0, 16), C.green, function(input)
+		beginRotate(selected, input)
+	end)
+end
+
+local function setSelected(obj)
+	if obj == EmptyHint then obj = nil end
+	if obj and not isSelectable(obj) then obj = nil end
+
+	selected = obj
+	removeSelectionVisual()
+
+	if selected then
+		showSelectionVisual()
+	end
+
+	updateEmpty()
+	refreshProperties()
+
+	if currentTab == "LAYERS" then
+		refreshLayers()
+	end
+end
+
+--// Connect selectable ------------------------------------------------------
+connectSelectable = function(obj)
+	if not obj or not obj:IsA("GuiObject") then return end
+	if obj == EmptyHint or obj.Name == "NORLI_Selection" then return end
+	if obj:GetAttribute("NORLI_Connected") == EDITOR_TOKEN then return end
+
+	obj:SetAttribute("NORLI_Connected", EDITOR_TOKEN)
+	obj.Active = true
+
+	obj.InputBegan:Connect(function(input)
+		if panel then return end
+		if isLocked(obj) then return end
+		if input.Target ~= obj then return end
+
+		if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+			if obj:IsA("TextBox") then
+				local ok, focused = pcall(function() return obj:IsFocused() end)
+				if ok and focused then return end
+			end
+
+			setSelected(obj)
+			beginDrag(obj, input)
+		end
+	end)
+end
+
+prepareTree = function(root, forceNewIds)
+	if not root then return end
+
+	removeEditorHelpersRecursive(root)
+
+	local function clearToken(obj)
+		if obj:IsA("GuiObject") then
+			obj:SetAttribute("NORLI_Connected", nil)
+		end
+	end
+
+	clearToken(root)
+	for _, descendant in ipairs(root:GetDescendants()) do
+		clearToken(descendant)
+	end
+
+	ensureTreeIds(root, forceNewIds == true)
+
+	if root:IsA("GuiObject") then
+		connectSelectable(root)
+	end
+
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("GuiObject") then
+			connectSelectable(descendant)
+		end
+	end
+end
+
+--// History -----------------------------------------------------------------
+local MAX_HISTORY = 40
+local undoStack = {}
+local redoStack = {}
+
+local function captureState()
+	local visualExisted = selectionVisual ~= nil
+	removeSelectionVisual()
+
+	local items = {}
+	for _, child in ipairs(DesignRoot:GetChildren()) do
+		if isUserElement(child) then
+			table.insert(items, child:Clone())
+		end
+	end
+
+	local selectedId = selected and selected:GetAttribute("NORLI_ID") or nil
+
+	if selected and visualExisted then
+		showSelectionVisual()
+	end
+
+	return {
+		items = items,
+		selectedId = selectedId,
+	}
+end
+
+local function pushPreState(state)
+	if suppressHistory or restoring then return end
+	table.insert(undoStack, state)
+	if #undoStack > MAX_HISTORY then
+		table.remove(undoStack, 1)
+	end
+	clearTable(redoStack)
+end
+
+local function saveUndoPoint()
+	if restoring or suppressHistory then return end
+	pushPreState(captureState())
+end
+
+local function clearUserElements()
+	for _, child in ipairs(DesignRoot:GetChildren()) do
+		if isUserElement(child) then
+			pcall(function() child:Destroy() end)
+		end
+	end
+end
+
+local function restoreState(state)
+	restoring = true
+
+	removeSelectionVisual()
+	clearUserElements()
+
+	for _, instance in ipairs(state.items or {}) do
+		local clone = instance:Clone()
+		clone.Parent = DesignRoot
+		prepareTree(clone, false)
+	end
+
+	updateEmpty()
+
+	local target = state.selectedId and findObjectById(state.selectedId) or nil
+	if target then
+		setSelected(target)
+	else
+		setSelected(nil)
+	end
+
+	restoring = false
+
+	if currentTab == "LAYERS" then refreshLayers() end
+	if currentTab == "INSPECT" then refreshProperties() end
+end
+
+doUndo = function()
+	if #undoStack == 0 then
+		toast("NADA PARA DESFAZER", C.muted)
+		return
+	end
+
+	local current = captureState()
+	local state = table.remove(undoStack)
+	table.insert(redoStack, current)
+	restoreState(state)
+	toast("DESFEITO", C.accent)
+end
+
+doRedo = function()
+	if #redoStack == 0 then
+		toast("NADA PARA REFAZER", C.muted)
+		return
+	end
+
+	local current = captureState()
+	local state = table.remove(redoStack)
+	table.insert(undoStack, current)
+	restoreState(state)
+	toast("REFEITO", C.accent)
+end
+
+--// Input helpers -----------------------------------------------------------
+local function getStageScale()
+	return ZoomScale.Scale
+end
+
+local function sameInput(inp, origin)
+	if inp == origin then return true end
+	if origin.UserInputType == Enum.UserInputType.MouseButton1 and inp.UserInputType == Enum.UserInputType.MouseMovement then
+		return true
+	end
+	if origin.UserInputType == Enum.UserInputType.Touch and inp.UserInputType == Enum.UserInputType.Touch then
+		return true
+	end
+	return false
+end
+
+beginDrag = function(obj, input)
+	if not obj or isLocked(obj) then return end
+
+	local preState = captureState()
+	local startInputPos = input.Position
+	local startObjPos = obj.Position
+	local moved = false
+
+	local conn1, conn2
+
+	conn1 = UserInputService.InputChanged:Connect(function(inp)
+		if not sameInput(inp, input) then return end
+
+		local delta = (inp.Position - startInputPos) / getStageScale()
+		if delta.Magnitude > 2 then moved = true end
+
+		local newX = startObjPos.X.Offset + delta.X
+		local newY = startObjPos.Y.Offset + delta.Y
+
+		if snapEnabled then
+			newX = round(newX / gridSize) * gridSize
+			newY = round(newY / gridSize) * gridSize
+		end
+
+		obj.Position = UDim2.new(startObjPos.X.Scale, newX, startObjPos.Y.Scale, newY)
+
+		if obj == selected then
+			showSelectionVisual()
+		end
+	end)
+
+	conn2 = UserInputService.InputEnded:Connect(function(inp)
+		if not sameInput(inp, input) then return end
+		pcall(function() conn1:Disconnect() end)
+		pcall(function() conn2:Disconnect() end)
+
+		if moved then
+			pushPreState(preState)
+		end
+	end)
+end
+
+beginResize = function(obj, input, hx, hy)
+	if not obj or isLocked(obj) then return end
+
+	local preState = captureState()
+	local startSize = obj.Size
+	local startPos = obj.Position
+	local startInputPos = input.Position
+
+	local rad = math.rad(obj.Rotation)
+	local cosA = math.cos(rad)
+	local sinA = math.sin(rad)
+
+	local conn1, conn2
+
+	conn1 = UserInputService.InputChanged:Connect(function(inp)
+		if not sameInput(inp, input) then return end
+
+		local raw = (inp.Position - startInputPos) / getStageScale()
+		local localDX = raw.X * cosA + raw.Y * sinA
+		local localDY = -raw.X * sinA + raw.Y * cosA
+
+		local newW = startSize.X.Offset + localDX * hx
+		local newH = startSize.Y.Offset + localDY * hy
+
+		newW = clamp(newW, 16, 3000)
+		newH = clamp(newH, 16, 3000)
+
+		if snapEnabled then
+			newW = round(newW / gridSize) * gridSize
+			newH = round(newH / gridSize) * gridSize
+		end
+
+		local adjX = hx == -1 and (startSize.X.Offset - newW) or 0
+		local adjY = hy == -1 and (startSize.Y.Offset - newH) or 0
+
+		local worldAdjX = adjX * cosA - adjY * sinA
+		local worldAdjY = adjX * sinA + adjY * cosA
+
+		obj.Size = UDim2.new(startSize.X.Scale, newW, startSize.Y.Scale, newH)
+		obj.Position = UDim2.new(
+			startPos.X.Scale,
+			startPos.X.Offset + worldAdjX,
+			startPos.Y.Scale,
+			startPos.Y.Offset + worldAdjY
+		)
+
+		if obj == selected then
+			showSelectionVisual()
+		end
+	end)
+
+	conn2 = UserInputService.InputEnded:Connect(function(inp)
+		if not sameInput(inp, input) then return end
+		pcall(function() conn1:Disconnect() end)
+		pcall(function() conn2:Disconnect() end)
+
+		pushPreState(preState)
+	end)
+end
+
+beginRotate = function(obj, input)
+	if not obj or isLocked(obj) then return end
+
+	local preState = captureState()
+	local startRotation = obj.Rotation
+	local center = obj.AbsolutePosition + obj.AbsoluteSize / 2
+	local startAngle = math.deg(math.atan2(input.Position.Y - center.Y, input.Position.X - center.X))
+
+	local conn1, conn2
+
+	conn1 = UserInputService.InputChanged:Connect(function(inp)
+		if not sameInput(inp, input) then return end
+
+		local angle = math.deg(math.atan2(inp.Position.Y - center.Y, inp.Position.X - center.X))
+		local newRotation = startRotation + (angle - startAngle)
+
+		if snapEnabled then
+			newRotation = round(newRotation / 15) * 15
+		end
+
+		obj.Rotation = newRotation
+
+		if obj == selected then
+			showSelectionVisual()
+		end
+	end)
+
+	conn2 = UserInputService.InputEnded:Connect(function(inp)
+		if not sameInput(inp, input) then return end
+		pcall(function() conn1:Disconnect() end)
+		pcall(function() conn2:Disconnect() end)
+
+		pushPreState(preState)
+	end)
+end
+
+--// Canvas gestures ---------------------------------------------------------
+local panStartPosition = nil
+pcall(function()
+	CanvasHolder.TouchPan:Connect(function(_, totalTranslation, _, state)
+		if state == Enum.UserInputState.Begin then
+			panStartPosition = DesignRoot.Position
+		elseif state == Enum.UserInputState.Change and panStartPosition then
+			DesignRoot.Position = UDim2.new(
+				panStartPosition.X.Scale,
+				panStartPosition.X.Offset + totalTranslation.X,
+				panStartPosition.Y.Scale,
+				panStartPosition.Y.Offset + totalTranslation.Y
+			)
+		else
+			panStartPosition = nil
+		end
+	end)
+end)
+
+local pinchStartScale = 1
+pcall(function()
+	CanvasHolder.TouchPinch:Connect(function(_, scale, _, state)
+		if state == Enum.UserInputState.Begin then
+			pinchStartScale = ZoomScale.Scale
+		elseif state == Enum.UserInputState.Change then
+			ZoomScale.Scale = clamp(pinchStartScale * scale, 0.4, 2.5)
+		end
+	end)
+end)
+
+DesignRoot.InputBegan:Connect(function(input)
+	if panel then return end
+	if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if input.Target == DesignRoot then
+			setSelected(nil)
+		end
+	end
+end)
+
+--// Toolbar -----------------------------------------------------------------
+local Toolbar = make("ScrollingFrame", {
+	Size = UDim2.new(1, 0, 0, TOOLBAR_H),
+	Position = UDim2.new(0, 0, 0, HEADER_H),
+	BackgroundColor3 = C.surface2,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 2,
+	ScrollBarImageColor3 = C.accent,
+	ScrollingDirection = Enum.ScrollingDirection.X,
+	CanvasSize = UDim2.new(),
+	ZIndex = 9,
+}, Root)
+
+safeSet(Toolbar, "AutomaticCanvasSize", Enum.AutomaticSize.X)
+
+make("UIListLayout", {
+	FillDirection = Enum.FillDirection.Horizontal,
+	Padding = UDim.new(0, 6),
+	VerticalAlignment = Enum.VerticalAlignment.Center,
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, Toolbar)
+
+make("UIPadding", {
+	PaddingLeft = UDim.new(0, 8),
+	PaddingRight = UDim.new(0, 8),
+}, Toolbar)
+
+local function toolButton(icon, width, callback)
+	local b = make("TextButton", {
+		Size = UDim2.new(0, width, 0, 26),
+		BackgroundColor3 = C.card,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = icon,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextColor3 = C.text,
+		ZIndex = 10,
+	}, Toolbar)
+	corner(b, 7)
+	if callback then b.Activated:Connect(callback) end
+	return b
+end
+
+toolButton("↺", 34, function() doUndo() end)
+toolButton("↻", 34, function() doRedo() end)
+
+local snapButton = toolButton("▦ SNAP OFF", 92, function()
+	snapEnabled = not snapEnabled
+	snapButton.Text = "▦ SNAP " .. (snapEnabled and "ON" or "OFF")
+	snapButton.BackgroundColor3 = snapEnabled and C.accent2 or C.card
+	toast("SNAP " .. (snapEnabled and "ATIVADO" or "DESATIVADO"), C.accent)
+end)
+
+local gridButton = toolButton("▦ " .. gridSize, 46, function()
+	gridIndex = (gridIndex % #gridSizes) + 1
+	gridSize = gridSizes[gridIndex]
+	gridButton.Text = "▦ " .. gridSize
+	toast("GRADE: " .. gridSize, C.accent)
+end)
+
+toolButton("－", 30, function()
+	ZoomScale.Scale = clamp(ZoomScale.Scale - 0.1, 0.4, 2.5)
+end)
+
+local zoomLabel = make("TextLabel", {
+	Size = UDim2.new(0, 48, 0, 26),
+	BackgroundColor3 = C.card,
+	BorderSizePixel = 0,
+	Text = "100%",
+	Font = Enum.Font.GothamBold,
+	TextSize = 9,
+	TextColor3 = C.text,
+	ZIndex = 10,
+}, Toolbar)
+corner(zoomLabel, 7)
+
+toolButton("＋", 30, function()
+	ZoomScale.Scale = clamp(ZoomScale.Scale + 0.1, 0.4, 2.5)
+end)
+
+toolButton("⤢ AJUSTAR", 78, function()
+	ZoomScale.Scale = 1
+	DesignRoot.Position = basePosition
+	toast("VISÃO RESETADA", C.accent)
+end)
+
+local safeButton = toolButton("◎ SAFE", 58, function()
+	SafeOverlay.Visible = not SafeOverlay.Visible
+	safeButton.BackgroundColor3 = SafeOverlay.Visible and C.accent2 or C.card
+	toast("ÁREA SEGURA " .. (SafeOverlay.Visible and "ON" or "OFF"), C.accent)
+end)
+
+ZoomScale:GetPropertyChangedSignal("Scale"):Connect(function()
+	zoomLabel.Text = tostring(round(ZoomScale.Scale * 100)) .. "%"
+end)
+
+--// Panel system ------------------------------------------------------------
+updateTabColors = function()
+	for id, button in pairs(tabButtons) do
+		button.BackgroundColor3 = (currentTab == id) and C.accent2 or C.surface2
+	end
+end
+
+clearPanelVisual = function()
+	if panelBackdrop then
+		pcall(function() panelBackdrop:Destroy() end)
+		panelBackdrop = nil
+	end
+
+	if panel then
+		pcall(function() panel:Destroy() end)
+		panel = nil
+	end
+
+	panelBody = nil
+end
+
+closePanel = function()
+	clearPanelVisual()
+	currentTab = nil
+	updateTabColors()
+end
+
+local function createDrawer(title)
+	clearPanelVisual()
+
+	panelBackdrop = make("TextButton", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.45,
+		BorderSizePixel = 0,
+		Text = "",
+		AutoButtonColor = false,
+		ZIndex = 190,
+	}, Root)
+
+	panelBackdrop.Activated:Connect(function()
+		closePanel()
+	end)
+
+	panel = make("Frame", {
+		Size = UDim2.new(0.94, 0, 0.78, 0),
+		Position = UDim2.new(0.03, 0, 0.10, 0),
+		BackgroundColor3 = C.surface,
+		BorderSizePixel = 0,
+		ZIndex = 200,
+	}, Root)
+	corner(panel, 16)
+
+	local stroke = ensureStroke(panel)
+	stroke.Color = C.line
+	stroke.Transparency = 0.16
+	stroke.Thickness = 1
+
+	make("TextLabel", {
+		Size = UDim2.new(1, -120, 0, 40),
+		Position = UDim2.new(0, 14, 0, 6),
+		BackgroundTransparency = 1,
+		Text = title,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = C.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 201,
+	}, panel)
+
+	local closeButton = make("TextButton", {
+		Size = UDim2.new(0, 86, 0, 32),
+		Position = UDim2.new(1, -100, 0, 10),
+		BackgroundColor3 = C.card,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = "← FECHAR",
+		Font = Enum.Font.GothamBold,
+		TextSize = 9,
+		TextColor3 = C.text,
+		ZIndex = 201,
+	}, panel)
+	corner(closeButton, 9)
+
+	closeButton.Activated:Connect(function()
+		closePanel()
+	end)
+
+	panelBody = make("ScrollingFrame", {
+		Size = UDim2.new(1, -20, 1, -58),
+		Position = UDim2.new(0, 10, 0, 50),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = C.accent,
+		CanvasSize = UDim2.new(),
+		ZIndex = 201,
+	}, panel)
+
+	make("UIPadding", {
+		PaddingLeft = UDim.new(0, 2),
+		PaddingRight = UDim.new(0, 2),
+		PaddingTop = UDim.new(0, 2),
+		PaddingBottom = UDim.new(0, 14),
+	}, panelBody)
+
+	local listLayout = make("UIListLayout", {
+		Padding = UDim.new(0, 7),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, panelBody)
+
+	listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		if panelBody then
+			panelBody.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 18)
+		end
+	end)
+
+	return panelBody
+end
+
+--// UI builders -------------------------------------------------------------
+local function clearBody(body)
+	if not body then return end
+	for _, child in ipairs(body:GetChildren()) do
+		if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+			child:Destroy()
+		end
+	end
+end
+
+local function section(parent, textValue)
+	return make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		BackgroundTransparency = 1,
+		Text = textValue,
+		Font = Enum.Font.GothamBold,
+		TextSize = 9,
+		TextColor3 = C.muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 202,
+	}, parent)
+end
+
+local function addTag(parent, value)
+	return make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 30),
+		BackgroundColor3 = C.surface2,
+		BorderSizePixel = 0,
+		Text = value,
+		Font = Enum.Font.GothamBold,
+		TextSize = 9,
+		TextColor3 = C.muted,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		TextWrapped = true,
+		ZIndex = 203,
+	}, parent)
+end
+
+local function button(parent, textValue, callback, height)
+	local b = make("TextButton", {
+		Size = UDim2.new(1, 0, 0, height or 36),
+		BackgroundColor3 = C.card,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = textValue,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextColor3 = C.text,
+		ZIndex = 202,
+	}, parent)
+	corner(b, 9)
+
+	b.Activated:Connect(callback)
+	b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = C.card2}, 0.08) end)
+	b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = C.card}, 0.08) end)
+
+	return b
+end
+
+local function compactRow(parent, labelText, valueText, onMinus, onPlus)
+	local wrap = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 38),
+		BackgroundTransparency = 1,
+		ZIndex = 202,
+	}, parent)
+
+	make("TextLabel", {
+		Size = UDim2.new(0.40, 0, 1, 0),
+		BackgroundTransparency = 1,
+		Text = labelText,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 9,
+		TextColor3 = C.muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 203,
+	}, wrap)
+
+	local minus = make("TextButton", {
+		Size = UDim2.new(0, 34, 0, 32),
+		Position = UDim2.new(0.42, 0, 0, 3),
+		BackgroundColor3 = C.card,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = "−",
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = C.text,
+		ZIndex = 203,
+	}, wrap)
+	corner(minus, 8)
+
+	local value = make("TextLabel", {
+		Size = UDim2.new(0, 54, 0, 32),
+		Position = UDim2.new(0.42, 38, 0, 3),
+		BackgroundColor3 = C.surface2,
+		BorderSizePixel = 0,
+		Text = valueText,
+		Font = Enum.Font.GothamBold,
+		TextSize = 9,
+		TextColor3 = C.text,
+		ZIndex = 203,
+	}, wrap)
+	corner(value, 8)
+
+	local plus = make("TextButton", {
+		Size = UDim2.new(0, 34, 0, 32),
+		Position = UDim2.new(0.42, 96, 0, 3),
+		BackgroundColor3 = C.card,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = "+",
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = C.text,
+		ZIndex = 203,
+	}, wrap)
+	corner(plus, 8)
+
+	minus.Activated:Connect(function()
+		saveUndoPoint()
+		onMinus(value)
+	end)
+
+	plus.Activated:Connect(function()
+		saveUndoPoint()
+		onPlus(value)
+	end)
+
+	return value
+end
+
+local function textBox(parent, labelText, initial, callback, placeholder, multiline)
+	local h = multiline and 120 or 56
+
+	local wrap = make("Frame", {
+		Size = UDim2.new(1, 0, 0, h),
+		BackgroundTransparency = 1,
+		ZIndex = 202,
+	}, parent)
+
+	make("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		BackgroundTransparency = 1,
+		Text = labelText,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 9,
+		TextColor3 = C.muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 203,
+	}, wrap)
+
+	local box = make("TextBox", {
+		Size = UDim2.new(1, 0, 0, h - 21),
+		Position = UDim2.new(0, 0, 0, 21),
+		BackgroundColor3 = C.card,
+		BorderSizePixel = 0,
+		Text = tostring(initial or ""),
+		PlaceholderText = placeholder or "",
+		ClearTextOnFocus = false,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 10,
+		TextColor3 = C.text,
+		PlaceholderColor3 = C.muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = multiline and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center,
+		MultiLine = multiline or false,
+		TextWrapped = multiline or false,
+		ZIndex = 203,
+	}, wrap)
+	corner(box, 9)
+
+	box.FocusLost:Connect(function()
+		callback(box.Text)
+	end)
+
+	return box
+end
+
+local function boolSwitch(parent, labelText, current, callback)
+	local value = current
+	local b = button(parent, labelText .. "  •  " .. (value and "ON" or "OFF"), function()
+		saveUndoPoint()
+		value = not value
+		callback(value)
+		b.Text = labelText .. "  •  " .. (value and "ON" or "OFF")
+	end, 36)
+	return b
+end
+
+local function makeCodeBox(parent, text, height)
+	local box = make("TextBox", {
+		Size = UDim2.new(1, 0, 0, height or 160),
+		BackgroundColor3 = Color3.fromRGB(8, 10, 14),
+		BorderSizePixel = 0,
+		Text = text or "",
+		PlaceholderText = "",
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Code,
+		TextSize = 9,
+		TextColor3 = Color3.fromRGB(220, 230, 245),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		MultiLine = true,
+		TextWrapped = false,
+		ZIndex = 203,
+	}, parent)
+	corner(box, 10)
+	return box
+end
+
+--// Element library ---------------------------------------------------------
+local elements = {
+	{class = "Frame", icon = "▣", label = "Frame", desc = "Painel / container"},
+	{class = "TextLabel", icon = "T", label = "Texto", desc = "Texto estático"},
+	{class = "TextButton", icon = "▣", label = "Botão", desc = "Botão de texto"},
+	{class = "TextBox", icon = "⌨", label = "Caixa", desc = "Campo de texto"},
+	{class = "ImageLabel", icon = "▧", label = "Imagem", desc = "Imagem estática"},
+	{class = "ImageButton", icon = "◈", label = "Img. Botão", desc = "Botão com imagem"},
+	{class = "ScrollingFrame", icon = "▤", label = "Scroll", desc = "Área rolável"},
+	{class = "ViewportFrame", icon = "◉", label = "3D", desc = "Viewport"},
+	{class = "CanvasGroup", icon = "◫", label = "Grupo", desc = "Grupo com aparência"},
+	{class = "VideoFrame", icon = "▶", label = "Vídeo", desc = "Vídeo GUI"},
+}
+
+local defaultProps = {
+	Frame = function()
+		return {BackgroundColor3 = Color3.fromRGB(52, 58, 74), Size = UDim2.fromOffset(180, 100)}
+	end,
+	TextLabel = function()
+		return {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromOffset(190, 42),
+			Text = "Texto",
+			Font = Enum.Font.GothamBold,
+			TextSize = 20,
+			TextColor3 = Color3.new(1, 1, 1),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+		}
+	end,
+	TextButton = function()
+		return {
+			BackgroundColor3 = C.accent2,
+			Size = UDim2.fromOffset(180, 50),
+			Text = "Botão",
+			Font = Enum.Font.GothamBold,
+			TextSize = 17,
+			TextColor3 = Color3.new(1, 1, 1),
+			AutoButtonColor = false,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+		}
+	end,
+	TextBox = function()
+		return {
+			BackgroundColor3 = Color3.fromRGB(40, 46, 60),
+			Size = UDim2.fromOffset(190, 50),
+			Text = "",
+			PlaceholderText = "Digite aqui...",
+			ClearTextOnFocus = false,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 16,
+			TextColor3 = Color3.new(1, 1, 1),
+		}
+	end,
+	ImageLabel = function()
+		return {BackgroundColor3 = Color3.fromRGB(34, 39, 50), Size = UDim2.fromOffset(170, 120), Image = ""}
+	end,
+	ImageButton = function()
+		return {BackgroundColor3 = Color3.fromRGB(34, 39, 50), Size = UDim2.fromOffset(170, 120), Image = "", AutoButtonColor = false}
+	end,
+	ScrollingFrame = function()
+		return {
+			BackgroundColor3 = Color3.fromRGB(32, 37, 48),
+			Size = UDim2.fromOffset(200, 150),
+			CanvasSize = UDim2.fromOffset(0, 450),
+			ScrollBarThickness = 5,
+			ScrollBarImageColor3 = C.accent,
+		}
+	end,
+	ViewportFrame = function()
+		return {BackgroundColor3 = Color3.fromRGB(24, 28, 37), Size = UDim2.fromOffset(190, 150)}
+	end,
+	CanvasGroup = function()
+		return {BackgroundColor3 = Color3.fromRGB(43, 48, 62), Size = UDim2.fromOffset(180, 100), GroupTransparency = 0}
+	end,
+	VideoFrame = function()
+		return {BackgroundColor3 = Color3.fromRGB(18, 20, 25), Size = UDim2.fromOffset(200, 130), Video = ""}
+	end,
+}
+
+local function uniqueName(base, parent)
+	local n = 1
+	local name = base
+	while parent and parent:FindFirstChild(name) do
+		n += 1
+		name = base .. n
+	end
+	return name
+end
+
+local function rememberRecent(className)
+	for i = #recentClasses, 1, -1 do
+		if recentClasses[i] == className then
+			table.remove(recentClasses, i)
+		end
+	end
+
+	table.insert(recentClasses, 1, className)
+
+	while #recentClasses > 5 do
+		table.remove(recentClasses)
+	end
+end
+
+local function createElement(className)
+	saveUndoPoint()
+
+	local parentObj = DesignRoot
+	if selected and selected:IsA("GuiObject") and selected ~= EmptyHint and selected ~= DesignRoot and not isLocked(selected) then
+		parentObj = selected
+	end
+
+	local ok, obj = pcall(Instance.new, className)
+	if not ok or not obj then
+		toast("ERRO AO CRIAR ELEMENTO", C.red)
+		return nil
+	end
+
+	obj.Name = uniqueName(className, parentObj)
+
+	local props = defaultProps[className] and defaultProps[className]() or {}
+	for k, v in pairs(props) do
+		safeSet(obj, k, v)
+	end
+
+	obj.Position = UDim2.fromOffset(20, 20)
+	obj.ZIndex = clamp((parentObj ~= DesignRoot and parentObj.ZIndex or 5) + 1, 1, 999)
+
+	if className ~= "TextLabel" then
+		corner(obj, 10)
+	else
+		corner(obj, 6)
+	end
+
+	ensureId(obj)
+	obj.Parent = parentObj
+	connectSelectable(obj)
+
+	setSelected(obj)
+	rememberRecent(className)
+	updateEmpty()
+	toast(className:upper() .. " CRIADO", C.green)
+
+	return obj
+end
+
+local function buildElement(parent, class, props, name)
+	local obj = Instance.new(class)
+	obj.Name = name or uniqueName(class, parent)
+
+	for k, v in pairs(props or {}) do
+		safeSet(obj, k, v)
+	end
+
+	if class ~= "TextLabel" then
+		corner(obj, 10)
+	else
+		corner(obj, 6)
+	end
+
+	ensureId(obj)
+	obj.Parent = parent
+	connectSelectable(obj)
+
+	return obj
+end
+
+local function duplicateObject(obj)
+	if not obj then return end
+
+	saveUndoPoint()
+
+	local clone = obj:Clone()
+	removeEditorHelpersRecursive(clone)
+
+	clone.Name = uniqueName(obj.Name, obj.Parent or DesignRoot)
+	clone.Position = obj.Position + UDim2.fromOffset(18, 18)
+
+	prepareTree(clone, true)
+	clone.Parent = obj.Parent or DesignRoot
+
+	setSelected(clone)
+	refreshLayers()
+	refreshProperties()
+	toast("DUPLICADO", C.green)
+end
+
+local function deleteObject(obj)
+	if not obj then return end
+
+	saveUndoPoint()
+
+	if selected == obj then
+		setSelected(nil)
+	end
+
+	obj:Destroy()
+	updateEmpty()
+	refreshLayers()
+	refreshProperties()
+	toast("APAGADO", C.red)
+end
+
+--// Alignment ---------------------------------------------------------------
+local function getParentSize(obj)
+	local p = obj.Parent
+	if p and p:IsA("GuiObject") then
+		return p.AbsoluteSize
+	end
+	return DesignRoot.AbsoluteSize
+end
+
+local function alignSelected(mode)
+	if not selected then
+		toast("SELECIONE UM ELEMENTO", C.muted)
+		return
+	end
+
+	saveUndoPoint()
+
+	local parentSize = getParentSize(selected)
+	local size = selected.AbsoluteSize
+	local ax = selected.AnchorPoint.X
+	local ay = selected.AnchorPoint.Y
+	local pos = selected.Position
+
+	local function setX(x)
+		selected.Position = UDim2.new(pos.X.Scale, x, pos.Y.Scale, selected.Position.Y.Offset)
+	end
+
+	local function setY(y)
+		selected.Position = UDim2.new(selected.Position.X.Scale, selected.Position.X.Offset, pos.Y.Scale, y)
+	end
+
+	if mode == "left" then
+		setX(size.X * ax)
+	elseif mode == "hcenter" then
+		setX((parentSize.X - size.X) / 2 + size.X * ax)
+	elseif mode == "right" then
+		setX(parentSize.X - size.X + size.X * ax)
+	elseif mode == "top" then
+		setY(size.Y * ay)
+	elseif mode == "vcenter" then
+		setY((parentSize.Y - size.Y) / 2 + size.Y * ay)
+	elseif mode == "bottom" then
+		setY(parentSize.Y - size.Y + size.Y * ay)
+	elseif mode == "fill" then
+		selected.Size = UDim2.new(1, 0, 1, 0)
+		selected.Position = UDim2.new(selected.AnchorPoint.X, 0, selected.AnchorPoint.Y, 0)
+	elseif mode == "fillw" then
+		selected.Size = UDim2.new(1, 0, selected.Size.Y.Scale, selected.Size.Y.Offset)
+	elseif mode == "fillh" then
+		selected.Size = UDim2.new(selected.Size.X.Scale, selected.Size.X.Offset, 1, 0)
+	end
+
+	showSelectionVisual()
+	toast("ALINHADO", C.accent)
+end
+
+--// Serialization / Lua export ----------------------------------------------
+local exportGuiProps = {
+	"Name", "Position", "Size", "AnchorPoint", "ZIndex", "Visible", "Rotation",
+	"LayoutOrder", "BackgroundColor3", "BackgroundTransparency", "BorderColor3",
+	"BorderSizePixel", "ClipsDescendants", "Active", "Selectable", "AutomaticSize",
+	"GroupTransparency",
+}
+
+local exportTextProps = {
+	"Text", "Font", "TextSize", "TextColor3", "TextTransparency",
+	"TextStrokeColor3", "TextStrokeTransparency", "TextScaled", "TextWrapped",
+	"TextXAlignment", "TextYAlignment", "TextTruncate", "RichText",
+	"PlaceholderText", "PlaceholderColor3", "ClearTextOnFocus", "MultiLine",
+}
+
+local exportImageProps = {
+	"Image", "ImageColor3", "ImageTransparency", "ResampleMode", "ScaleType",
+	"SliceCenter", "SliceScale", "TileSize",
+}
+
+local exportScrollProps = {
+	"CanvasSize", "CanvasPosition", "ScrollBarThickness", "ScrollBarImageColor3",
+	"ScrollBarImageTransparency", "ScrollingDirection", "ElasticBehavior",
+	"HorizontalScrollBarInset", "VerticalScrollBarInset",
+}
+
+local exportVideoProps = {"Video"}
+local exportStrokeProps = {"Color", "Transparency", "Thickness", "Enabled", "LineJoinMode"}
+local exportCornerProps = {"CornerRadius"}
+local exportPaddingProps = {"PaddingTop", "PaddingBottom", "PaddingLeft", "PaddingRight"}
+local exportGradientProps = {"Color", "Transparency", "Rotation", "Offset", "Scale", "Enabled"}
+local exportAspectProps = {"AspectRatio", "AspectType", "DominantAxis"}
+local exportSizeProps = {"MinSize", "MaxSize"}
+local exportScaleProps = {"Scale"}
+
+local exportListProps = {
+	"FillDirection", "HorizontalAlignment", "VerticalAlignment", "Padding",
+	"SortOrder", "Wraps", "HorizontalFlex", "VerticalFlex", "ItemLineAlignment",
+	"FillDirectionMaxCells",
+}
+
+local exportGridProps = {
+	"CellPadding", "CellSize", "FillDirection", "FillDirectionMaxCells",
+	"HorizontalAlignment", "VerticalAlignment", "SortOrder", "StartCorner",
+}
+
+local exportPageProps = {
+	"Animated", "Circular", "EasingDirection", "EasingStyle", "Padding",
+	"TweenTime", "TouchInputEnabled", "GamepadInputEnabled", "ScrollWheelInputEnabled",
+}
+
+local function luaString(v)
+	v = tostring(v or "")
+	v = v:gsub("\\", "\\\\")
+	v = v:gsub("\n", "\\n")
+	v = v:gsub("\r", "\\r")
+	v = v:gsub("\"", "\\\"")
+	return "\"" .. v .. "\""
+end
+
+local function nstr(n)
+	n = tonumber(n) or 0
+	if math.abs(n) < 0.000001 then n = 0 end
+	local s = string.format("%.4f", n)
+	s = s:gsub("(%..-)0+$", "%1"):gsub("%.$", "")
+	return s
+end
+
+local function ser(v)
+	local t = typeof(v)
+
+	if t == "string" then return luaString(v) end
+	if t == "number" then return nstr(v) end
+	if t == "boolean" then return v and "true" or "false" end
+	if t == "Color3" then return string.format("Color3.fromRGB(%d,%d,%d)", round(v.R * 255), round(v.G * 255), round(v.B * 255)) end
+	if t == "UDim" then return string.format("UDim.new(%s,%s)", nstr(v.Scale), nstr(v.Offset)) end
+	if t == "UDim2" then return string.format("UDim2.new(%s,%s,%s,%s)", nstr(v.X.Scale), nstr(v.X.Offset), nstr(v.Y.Scale), nstr(v.Y.Offset)) end
+	if t == "Vector2" then return string.format("Vector2.new(%s,%s)", nstr(v.X), nstr(v.Y)) end
+	if t == "Vector3" then return string.format("Vector3.new(%s,%s,%s)", nstr(v.X), nstr(v.Y), nstr(v.Z)) end
+	if t == "EnumItem" then return tostring(v) end
+	if t == "BrickColor" then return "BrickColor.new(" .. luaString(v.Name) .. ")" end
+	if t == "Rect" then return string.format("Rect.new(%s,%s,%s,%s)", nstr(v.Min.X), nstr(v.Min.Y), nstr(v.Max.X), nstr(v.Max.Y)) end
+
+	return nil
+end
+
+local function shouldSkipLua(obj)
+	if obj.Name == "NORLI_Selection" then return true end
+	if obj == EmptyHint then return true end
+
+	if not (
+		obj:IsA("GuiObject") or obj:IsA("UICorner") or obj:IsA("UIStroke") or
+		obj:IsA("UIGradient") or obj:IsA("UIPadding") or obj:IsA("UIAspectRatioConstraint") or
+		obj:IsA("UISizeConstraint") or obj:IsA("UIScale") or obj:IsA("UIListLayout") or
+		obj:IsA("UIGridLayout") or obj:IsA("UIPageLayout")
+	) then
+		return true
+	end
+
+	return false
+end
+
+local function appendProps(lines, var, obj, props)
+	for _, prop in ipairs(props) do
+		local value = safeGet(obj, prop)
+		local encoded = value ~= nil and ser(value)
+		if encoded then
+			table.insert(lines, var .. "." .. prop .. " = " .. encoded)
+		end
+	end
+end
+
+local function serializeTree(lines, obj, parentExpr, vars, indexRef)
+	if shouldSkipLua(obj) then return end
+
+	indexRef.n += 1
+	local var = "obj" .. indexRef.n
+	vars[obj] = var
+
+	table.insert(lines, "local " .. var .. " = Instance.new(" .. luaString(obj.ClassName) .. ")")
+
+	if obj:IsA("GuiObject") then
+		appendProps(lines, var, obj, exportGuiProps)
+
+		if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+			appendProps(lines, var, obj, exportTextProps)
+		end
+
+		if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+			appendProps(lines, var, obj, exportImageProps)
+		end
+
+		if obj:IsA("ScrollingFrame") then
+			appendProps(lines, var, obj, exportScrollProps)
+		end
+
+		if obj:IsA("VideoFrame") then
+			appendProps(lines, var, obj, exportVideoProps)
+		end
+
+		if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+			local interact = safeGet(obj, "Interactable")
+			if interact ~= nil then
+				table.insert(lines, var .. ".Interactable = " .. ser(interact))
+			end
+		end
+	elseif obj:IsA("UIStroke") then
+		appendProps(lines, var, obj, exportStrokeProps)
+	elseif obj:IsA("UICorner") then
+		appendProps(lines, var, obj, exportCornerProps)
+	elseif obj:IsA("UIPadding") then
+		appendProps(lines, var, obj, exportPaddingProps)
+	elseif obj:IsA("UIGradient") then
+		appendProps(lines, var, obj, exportGradientProps)
+	elseif obj:IsA("UIAspectRatioConstraint") then
+		appendProps(lines, var, obj, exportAspectProps)
+	elseif obj:IsA("UISizeConstraint") then
+		appendProps(lines, var, obj, exportSizeProps)
+	elseif obj:IsA("UIScale") then
+		appendProps(lines, var, obj, exportScaleProps)
+	elseif obj:IsA("UIListLayout") then
+		appendProps(lines, var, obj, exportListProps)
+	elseif obj:IsA("UIGridLayout") then
+		appendProps(lines, var, obj, exportGridProps)
+	elseif obj:IsA("UIPageLayout") then
+		appendProps(lines, var, obj, exportPageProps)
+	end
+
+	table.insert(lines, var .. ".Parent = " .. parentExpr)
+	table.insert(lines, "")
+
+	for _, child in ipairs(obj:GetChildren()) do
+		serializeTree(lines, child, var, vars, indexRef)
+	end
+end
+
+local function exportLua()
+	local lines = {}
+
+	table.insert(lines, "-- NORLI GUI STUDIO V4 PRO EXPORT")
+	table.insert(lines, "local Players = game:GetService(\"Players\")")
+	table.insert(lines, "local player = Players.LocalPlayer")
+	table.insert(lines, "local playerGui = player:WaitForChild(\"PlayerGui\")")
+	table.insert(lines, "local old = playerGui:FindFirstChild(\"NORLI_EXPORTED_GUI_V4\")")
+	table.insert(lines, "if old then old:Destroy() end")
+	table.insert(lines, "")
+	table.insert(lines, "local gui = Instance.new(\"ScreenGui\")")
+	table.insert(lines, "gui.Name = \"NORLI_EXPORTED_GUI_V4\"")
+	table.insert(lines, "gui.IgnoreGuiInset = true")
+	table.insert(lines, "gui.ResetOnSpawn = false")
+	table.insert(lines, "gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling")
+	table.insert(lines, "gui.Parent = playerGui")
+	table.insert(lines, "")
+
+	local vars = {}
+	local indexRef = {n = 0}
+
+	for _, obj in ipairs(DesignRoot:GetChildren()) do
+		if isUserElement(obj) then
+			serializeTree(lines, obj, "gui", vars, indexRef)
+		end
+	end
+
+	table.insert(lines, "print(\"NORLI GUI V4 export concluído\")")
+	return table.concat(lines, "\n")
+end
+
+--// JSON project save/load ---------------------------------------------------
+local function encodeValue(v)
+	local t = typeof(v)
+
+	if t == "string" then return {T = "s", V = v} end
+	if t == "number" then return {T = "n", V = v} end
+	if t == "boolean" then return {T = "b", V = v} end
+	if t == "Color3" then return {T = "c3", V = {v.R, v.G, v.B}} end
+	if t == "UDim" then return {T = "ud", V = {v.Scale, v.Offset}} end
+	if t == "UDim2" then return {T = "ud2", V = {v.X.Scale, v.X.Offset, v.Y.Scale, v.Y.Offset}} end
+	if t == "Vector2" then return {T = "v2", V = {v.X, v.Y}} end
+	if t == "Vector3" then return {T = "v3", V = {v.X, v.Y, v.Z}} end
+	if t == "EnumItem" then return {T = "e", V = tostring(v)} end
+	if t == "Rect" then return {T = "rect", V = {v.Min.X, v.Min.Y, v.Max.X, v.Max.Y}} end
+	if t == "BrickColor" then return {T = "bc", V = v.Name} end
+
+	return nil
+end
+
+local function decodeValue(data)
+	if type(data) ~= "table" then return data end
+
+	local t = data.T
+	local v = data.V
+
+	if t == "s" then return v end
+	if t == "n" then return tonumber(v) end
+	if t == "b" then return v == true end
+	if t == "c3" then return Color3.new(v[1] or 0, v[2] or 0, v[3] or 0) end
+	if t == "ud" then return UDim.new(v[1] or 0, v[2] or 0) end
+	if t == "ud2" then return UDim2.new(v[1] or 0, v[2] or 0, v[3] or 0, v[4] or 0) end
+	if t == "v2" then return Vector2.new(v[1] or 0, v[2] or 0) end
+	if t == "v3" then return Vector3.new(v[1] or 0, v[2] or 0, v[3] or 0) end
+	if t == "rect" then return Rect.new(v[1] or 0, v[2] or 0, v[3] or 0, v[4] or 0) end
+	if t == "bc" then return BrickColor.new(tostring(v)) end
+
+	if t == "e" then
+		local enumType, enumName = splitEnumString(v)
+		if enumType and enumName then
+			local ok, enumItem = pcall(function() return Enum[enumType][enumName] end)
+			if ok then return enumItem end
+		end
+	end
+
+	return nil
+end
+
+local function appendEncodedProps(obj, props)
+	local function add(list)
+		for _, prop in ipairs(list) do
+			if prop ~= "Name" then
+				local value = safeGet(obj, prop)
+				if value ~= nil then
+					local encoded = encodeValue(value)
+					if encoded then props[prop] = encoded end
+				end
+			end
+		end
+	end
+
+	if obj:IsA("GuiObject") then
+		add(exportGuiProps)
+
+		if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+			add(exportTextProps)
+		end
+
+		if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+			add(exportImageProps)
+		end
+
+		if obj:IsA("ScrollingFrame") then
+			add(exportScrollProps)
+		end
+
+		if obj:IsA("VideoFrame") then
+			add(exportVideoProps)
+		end
+
+		if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+			local interact = safeGet(obj, "Interactable")
+			if interact ~= nil then
+				props.Interactable = encodeValue(interact)
+			end
+		end
+	elseif obj:IsA("UIStroke") then
+		add(exportStrokeProps)
+	elseif obj:IsA("UICorner") then
+		add(exportCornerProps)
+	elseif obj:IsA("UIPadding") then
+		add(exportPaddingProps)
+	elseif obj:IsA("UIGradient") then
+		add(exportGradientProps)
+	elseif obj:IsA("UIAspectRatioConstraint") then
+		add(exportAspectProps)
+	elseif obj:IsA("UISizeConstraint") then
+		add(exportSizeProps)
+	elseif obj:IsA("UIScale") then
+		add(exportScaleProps)
+	elseif obj:IsA("UIListLayout") then
+		add(exportListProps)
+	elseif obj:IsA("UIGridLayout") then
+		add(exportGridProps)
+	elseif obj:IsA("UIPageLayout") then
+		add(exportPageProps)
+	end
+end
+
+local function shouldSkipForSerialize(obj)
+	if obj.Name == "NORLI_Selection" then return true end
+	if obj == EmptyHint then return true end
+
+	if not (
+		obj:IsA("GuiObject") or obj:IsA("UICorner") or obj:IsA("UIStroke") or
+		obj:IsA("UIGradient") or obj:IsA("UIPadding") or obj:IsA("UIAspectRatioConstraint") or
+		obj:IsA("UISizeConstraint") or obj:IsA("UIScale") or obj:IsA("UIListLayout") or
+		obj:IsA("UIGridLayout") or obj:IsA("UIPageLayout")
+	) then
+		return true
+	end
+
+	return false
+end
+
+local function encodeNode(obj)
+	local node = {
+		C = obj.ClassName,
+		N = obj.Name,
+		P = {},
+		A = {},
+		Ch = {},
+	}
+
+	appendEncodedProps(obj, node.P)
+
+	if obj:IsA("GuiObject") then
+		local locked = obj:GetAttribute("NORLI_Locked")
+		if locked then node.A.L = true end
+	end
+
+	for _, child in ipairs(obj:GetChildren()) do
+		if not shouldSkipForSerialize(child) then
+			table.insert(node.Ch, encodeNode(child))
+		end
+	end
+
+	return node
+end
+
+local function exportProjectJSON()
+	local project = {
+		V = 4,
+		Root = {},
+	}
+
+	for _, child in ipairs(DesignRoot:GetChildren()) do
+		if isUserElement(child) then
+			table.insert(project.Root, encodeNode(child))
+		end
+	end
+
+	local ok, json = pcall(function() return HttpService:JSONEncode(project) end)
+	return ok and json or "-- ERRO AO GERAR JSON"
+end
+
+local function decodeNode(node, parent, forceNewIds)
+	if type(node) ~= "table" then return nil end
+
+	local ok, obj = pcall(Instance.new, node.C)
+	if not ok or not obj then return nil end
+
+	obj.Name = node.N or node.C
+
+	for propName, encoded in pairs(node.P or {}) do
+		local value = decodeValue(encoded)
+		if value ~= nil then
+			safeSet(obj, propName, value)
+		end
+	end
+
+	if node.A and node.A.L then
+		obj:SetAttribute("NORLI_Locked", true)
+	end
+
+	obj.Parent = parent
+
+	for _, child in ipairs(node.Ch or {}) do
+		decodeNode(child, obj, forceNewIds)
+	end
+
+	if obj:IsA("GuiObject") then
+		if forceNewIds or not obj:GetAttribute("NORLI_ID") then
+			obj:SetAttribute("NORLI_ID", newId())
+		end
+		connectSelectable(obj)
+	end
+
+	return obj
+end
+
+local function clearCanvas()
+	removeSelectionVisual()
+	clearUserElements()
+	setSelected(nil)
+	updateEmpty()
+end
+
+local function importProjectJSON(text)
+	local ok, data = pcall(function() return HttpService:JSONDecode(text) end)
+	if not ok or type(data) ~= "table" then
+		toast("JSON INVÁLIDO", C.red)
+		return false
+	end
+
+	saveUndoPoint()
+	clearCanvas()
+
+	local nodes = data.Root or data.root or data
+	if type(nodes) == "table" then
+		for _, node in ipairs(nodes) do
+			decodeNode(node, DesignRoot, true)
+		end
+	end
+
+	updateEmpty()
+	refreshLayers()
+	refreshProperties()
+	toast("PROJETO CARREGADO", C.green)
+	return true
+end
+
+--// Preview -----------------------------------------------------------------
+openPreview = function()
+	removeSelectionVisual()
+
+	if previewGui then
+		pcall(function() previewGui:Destroy() end)
+		previewGui = nil
+	end
+
+	previewGui = make("ScreenGui", {
+		Name = "NORLI_PREVIEW_GUI",
+		IgnoreGuiInset = true,
+		ResetOnSpawn = false,
+		DisplayOrder = 999999,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	}, playerGui)
+
+	local main = make("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+	}, previewGui)
+
+	for _, child in ipairs(DesignRoot:GetChildren()) do
+		if isUserElement(child) then
+			local clone = child:Clone()
+			removeEditorHelpersRecursive(clone)
+			clone.Parent = main
+		end
+	end
+
+	local backButton = make("TextButton", {
+		Size = UDim2.fromOffset(110, 36),
+		Position = UDim2.new(1, -122, 0, 12),
+		BackgroundColor3 = C.red,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = "✕ VOLTAR",
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		TextColor3 = Color3.new(1, 1, 1),
+		ZIndex = 999999,
+	}, previewGui)
+	corner(backButton, 10)
+
+	backButton.Activated:Connect(function()
+		if previewGui then
+			pcall(function() previewGui:Destroy() end)
+			previewGui = nil
+		end
+		Root.Visible = true
+	end)
+
+	Root.Visible = false
+	toast("PREVIEW ATIVO", C.green)
+end
+
+--// Templates ---------------------------------------------------------------
+local function templateButton()
+	saveUndoPoint()
+	local obj = buildElement(DesignRoot, "TextButton", {
+		Size = UDim2.fromOffset(220, 56),
+		Position = UDim2.fromOffset(24, 24),
+		Text = "BOTÃO",
+		Font = Enum.Font.GothamBold,
+		TextSize = 18,
+		TextColor3 = Color3.new(1, 1, 1),
+		BackgroundColor3 = C.accent,
+		AutoButtonColor = false,
+	})
+	setSelected(obj)
+	toast("MODELO: BOTÃO", C.green)
+end
+
+local function templateCard()
+	saveUndoPoint()
+
+	local card = buildElement(DesignRoot, "Frame", {
+		Size = UDim2.fromOffset(260, 140),
+		Position = UDim2.fromOffset(24, 24),
+		BackgroundColor3 = Color3.fromRGB(28, 33, 44),
+	})
+
+	buildElement(card, "TextLabel", {
+		Size = UDim2.new(1, -20, 0, 28),
+		Position = UDim2.new(0, 10, 0, 10),
+		BackgroundTransparency = 1,
+		Text = "TÍTULO",
+		Font = Enum.Font.GothamBold,
+		TextSize = 18,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+
+	buildElement(card, "TextLabel", {
+		Size = UDim2.new(1, -20, 0, 64),
+		Position = UDim2.new(0, 10, 0, 42),
+		BackgroundTransparency = 1,
+		Text = "Descrição do cartão. Toque para selecionar e editar.",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = C.muted,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+	})
+
+	setSelected(card)
+	toast("MODELO: CARTÃO", C.green)
+end
+
+local function templateList()
+	saveUndoPoint()
+
+	local list = buildElement(DesignRoot, "ScrollingFrame", {
+		Size = UDim2.fromOffset(250, 230),
+		Position = UDim2.fromOffset(24, 24),
+		BackgroundColor3 = Color3.fromRGB(26, 30, 40),
+		CanvasSize = UDim2.fromOffset(0, 190),
+		ScrollBarThickness = 5,
+		ScrollBarImageColor3 = C.accent,
+	})
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 8)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = list
+
+	for i = 1, 3 do
+		buildElement(list, "TextButton", {
+			Size = UDim2.new(1, -16, 0, 50),
+			Position = UDim2.fromOffset(8, (i - 1) * 58 + 8),
+			Text = "ITEM " .. i,
+			Font = Enum.Font.GothamBold,
+			TextSize = 15,
+			TextColor3 = Color3.new(1, 1, 1),
+			BackgroundColor3 = Color3.fromRGB(42, 49, 64),
+			AutoButtonColor = false,
+		})
+	end
+
+	setSelected(list)
+	toast("MODELO: LISTA", C.green)
+end
+
+local function templateTopBar()
+	saveUndoPoint()
+
+	local bar = buildElement(DesignRoot, "Frame", {
+		Size = UDim2.new(1, 0, 0, 54),
+		Position = UDim2.fromOffset(0, 0),
+		BackgroundColor3 = Color3.fromRGB(20, 24, 33),
+	})
+
+	buildElement(bar, "TextLabel", {
+		Size = UDim2.new(1, -110, 1, 0),
+		Position = UDim2.new(0, 16, 0, 0),
+		BackgroundTransparency = 1,
+		Text = "TÍTULO DA TELA",
+		Font = Enum.Font.GothamBold,
+		TextSize = 18,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+
+	buildElement(bar, "TextButton", {
+		Size = UDim2.fromOffset(74, 36),
+		Position = UDim2.new(1, -88, 0, 9),
+		Text = "VOLTAR",
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		TextColor3 = Color3.new(1, 1, 1),
+		BackgroundColor3 = C.red,
+		AutoButtonColor = false,
+	})
+
+	setSelected(bar)
+	toast("MODELO: TOP BAR", C.green)
+end
+
+local function templateModal()
+	saveUndoPoint()
+
+	local dim = buildElement(DesignRoot, "Frame", {
+		Size = UDim2.fromScale(1, 1),
+		Position = UDim2.fromOffset(0, 0),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.45,
+		ZIndex = 40,
+	})
+
+	local card = buildElement(dim, "Frame", {
+		Size = UDim2.fromOffset(280, 180),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = Color3.fromRGB(27, 32, 43),
+		ZIndex = 41,
+	})
+
+	buildElement(card, "TextLabel", {
+		Size = UDim2.new(1, -24, 0, 30),
+		Position = UDim2.new(0, 12, 0, 12),
+		BackgroundTransparency = 1,
+		Text = "MODAL",
+		Font = Enum.Font.GothamBold,
+		TextSize = 18,
+		TextColor3 = Color3.new(1, 1, 1),
+		ZIndex = 42,
+	})
+
+	buildElement(card, "TextLabel", {
+		Size = UDim2.new(1, -24, 0, 58),
+		Position = UDim2.new(0, 12, 0, 46),
+		BackgroundTransparency = 1,
+		Text = "Este é um modal pronto. Você pode editar todos os elementos.",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = C.muted,
+		TextWrapped = true,
+		ZIndex = 42,
+	})
+
+	buildElement(card, "TextButton", {
+		Size = UDim2.fromOffset(110, 38),
+		Position = UDim2.new(0.5, 0, 1, -50),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Text = "OK",
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = Color3.new(1, 1, 1),
+		BackgroundColor3 = C.accent,
+		AutoButtonColor = false,
+		ZIndex = 42,
+	})
+
+	setSelected(dim)
+	toast("MODELO: MODAL", C.green)
+end
+
+local function templateToast()
+	saveUndoPoint()
+
+	local toastFrame = buildElement(DesignRoot, "Frame", {
+		Size = UDim2.fromOffset(240, 48),
+		Position = UDim2.new(0.5, 0, 1, -80),
+		AnchorPoint = Vector2.new(0.5, 0),
+		BackgroundColor3 = Color3.fromRGB(29, 34, 45),
+	})
+
+	buildElement(toastFrame, "TextLabel", {
+		Size = UDim2.new(1, -20, 1, 0),
+		Position = UDim2.new(0, 10, 0, 0),
+		BackgroundTransparency = 1,
+		Text = "Mensagem rápida",
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = Color3.new(1, 1, 1),
+	})
+
+	setSelected(toastFrame)
+	toast("MODELO: TOAST", C.green)
+end
+
+local function templateInput()
+	saveUndoPoint()
+
+	local input = buildElement(DesignRoot, "TextBox", {
+		Size = UDim2.fromOffset(230, 52),
+		Position = UDim2.fromOffset(24, 24),
+		Text = "",
+		PlaceholderText = "Digite algo...",
+		ClearTextOnFocus = false,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 15,
+		TextColor3 = Color3.new(1, 1, 1),
+		BackgroundColor3 = Color3.fromRGB(38, 44, 57),
+	})
+
+	setSelected(input)
+	toast("MODELO: INPUT", C.green)
+end
+
+--// Panels ------------------------------------------------------------------
+local function openElements()
+	local body = createDrawer("OBJETOS")
+
+	addTag(body, "Se houver um elemento selecionado e destravado, o novo elemento vira filho dele.")
+
+	local search = textBox(body, "BUSCAR", "", function() end, "ex.: botão, imagem, scroll")
+
+	local recentSection = section(body, "USADOS RECENTEMENTE")
+	local recentGrid = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 64),
+		BackgroundTransparency = 1,
+		ZIndex = 202,
+	}, body)
+
+	make("UIGridLayout", {
+		CellSize = UDim2.new(0.48, 0, 0, 60),
+		CellPadding = UDim2.new(0, 7, 0, 7),
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, recentGrid)
+
+	section(body, "TODOS OS ELEMENTOS")
+
+	local grid = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 360),
+		BackgroundTransparency = 1,
+		ZIndex = 202,
+	}, body)
+
+	make("UIGridLayout", {
+		CellSize = UDim2.new(0.48, 0, 0, 60),
+		CellPadding = UDim2.new(0, 7, 0, 7),
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, grid)
+
+	local elementByClass = {}
+	for _, info in ipairs(elements) do
+		elementByClass[info.class] = info
+	end
+
+	local function elementCard(parent, info)
+		local card = make("TextButton", {
+			BackgroundColor3 = C.card,
+			BorderSizePixel = 0,
+			Text = "",
+			AutoButtonColor = false,
+			ZIndex = 203,
+		}, parent)
+		corner(card, 10)
+
+		make("TextLabel", {
+			Size = UDim2.new(0, 40, 1, 0),
+			Position = UDim2.new(0, 8, 0, 0),
+			BackgroundTransparency = 1,
+			Text = info.icon,
+			Font = Enum.Font.GothamBold,
+			TextSize = 20,
+			TextColor3 = C.accent,
+			ZIndex = 204,
+		}, card)
+
+		make("TextLabel", {
+			Size = UDim2.new(1, -58, 0, 22),
+			Position = UDim2.new(0, 54, 0, 8),
+			BackgroundTransparency = 1,
+			Text = info.label,
+			Font = Enum.Font.GothamBold,
+			TextSize = 10,
+			TextColor3 = C.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = 204,
+		}, card)
+
+		make("TextLabel", {
+			Size = UDim2.new(1, -58, 0, 18),
+			Position = UDim2.new(0, 54, 0, 30),
+			BackgroundTransparency = 1,
+			Text = info.desc,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 8,
+			TextColor3 = C.muted,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = 204,
+		}, card)
+
+		card.Activated:Connect(function()
+			createElement(info.class)
+		end)
+	end
+
+	local function rebuildRecent()
+		for _, child in ipairs(recentGrid:GetChildren()) do
+			if child:IsA("GuiButton") then child:Destroy() end
+		end
+
+		if #recentClasses == 0 then
+			recentSection.Visible = false
+			recentGrid.Visible = false
+			recentGrid.Size = UDim2.new(1, 0, 0, 0)
+			return
+		end
+
+		recentSection.Visible = true
+		recentGrid.Visible = true
+		recentGrid.Size = UDim2.new(1, 0, 0, 64)
+
+		for _, className in ipairs(recentClasses) do
+			local info = elementByClass[className]
+			if info then
+				elementCard(recentGrid, info)
+			end
+		end
+	end
+
+	local function rebuildGrid(filterText)
+		for _, child in ipairs(grid:GetChildren()) do
+			if child:IsA("GuiButton") then child:Destroy() end
+		end
+
+		filterText = tostring(filterText or ""):lower()
+		local shown = 0
+
+		for _, info in ipairs(elements) do
+			if filterText == "" or info.label:lower():find(filterText, 1, true) or info.class:lower():find(filterText, 1, true) then
+				elementCard(grid, info)
+				shown += 1
+			end
+		end
+
+		grid.Size = UDim2.new(1, 0, 0, math.ceil(shown / 2) * 67)
+	end
+
+	search:GetPropertyChangedSignal("Text"):Connect(function()
+		rebuildGrid(search.Text)
+	end)
+
+	rebuildRecent()
+	rebuildGrid("")
+end
+
+local function layerRow(parent, obj, depth)
+	local card = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 88),
+		BackgroundColor3 = (obj == selected) and C.accent2 or C.card,
+		BorderSizePixel = 0,
+		ZIndex = 203,
+	}, parent)
+	corner(card, 10)
+
+	local icons = {
+		Frame = "▣",
+		TextLabel = "T",
+		TextButton = "▣",
+		TextBox = "⌨",
+		ImageLabel = "▧",
+		ImageButton = "◈",
+		ScrollingFrame = "▤",
+		ViewportFrame = "◉",
+		CanvasGroup = "◫",
+		VideoFrame = "▶",
+	}
+
+	local nameBtn = make("TextButton", {
+		Size = UDim2.new(1, -14, 0, 26),
+		Position = UDim2.new(0, 7 + math.min(depth * 10, 40), 0, 6),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Text = (icons[obj.ClassName] or "•") .. "  " .. obj.Name,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+		TextColor3 = C.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ZIndex = 204,
+	}, card)
+
+	nameBtn.Activated:Connect(function()
+		setSelected(obj)
+		refreshLayers()
+	end)
+
+	local strip = make("Frame", {
+		Size = UDim2.new(1, -14, 0, 30),
+		Position = UDim2.new(0, 7, 0, 38),
+		BackgroundTransparency = 1,
+		ZIndex = 204,
+	}, card)
+
+	make("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 4),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, strip)
+
+	local function miniBtn(text, bg)
+		local b = make("TextButton", {
+			Size = UDim2.new(0, 30, 1, 0),
+			BackgroundColor3 = bg or C.surface2,
+			BorderSizePixel = 0,
+			AutoButtonColor = false,
+			Text = text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 11,
+			TextColor3 = C.text,
+			ZIndex = 205,
+		}, strip)
+		corner(b, 7)
+		return b
+	end
+
+	local lockBtn = miniBtn(isLocked(obj) and "🔒" or "🔓")
+	lockBtn.Activated:Connect(function()
+		saveUndoPoint()
+		obj:SetAttribute("NORLI_Locked", not isLocked(obj))
+		refreshLayers()
+		showSelectionVisual()
+	end)
+
+	local visBtn = miniBtn(obj.Visible and "👁" or "🚫")
+	visBtn.Activated:Connect(function()
+		saveUndoPoint()
+		obj.Visible = not obj.Visible
+		refreshLayers()
+	end)
+
+	local upBtn = miniBtn("▲")
+	upBtn.Activated:Connect(function()
+		saveUndoPoint()
+		obj.ZIndex = clamp(obj.ZIndex + 1, 0, 999)
+		toast("CAMADA PARA FRENTE", C.accent)
+	end)
+
+	local downBtn = miniBtn("▼")
+	downBtn.Activated:Connect(function()
+		saveUndoPoint()
+		obj.ZIndex = clamp(obj.ZIndex - 1, 0, 999)
+		toast("CAMADA PARA TRÁS", C.accent)
+	end)
+
+	local dupBtn = miniBtn("⧉")
+	dupBtn.Activated:Connect(function()
+		duplicateObject(obj)
+	end)
+
+	local delBtn = miniBtn("✕", C.red)
+	delBtn.Activated:Connect(function()
+		deleteObject(obj)
+	end)
+end
+
+local function openLayers()
+	createDrawer("CAMADAS")
+
+	refreshLayers = function()
+		if currentTab ~= "LAYERS" or not panelBody then return end
+
+		clearBody(panelBody)
+
+		local items = {}
+
+		local function scan(p, depth)
+			for _, child in ipairs(p:GetChildren()) do
+				if child:IsA("GuiObject") and child ~= EmptyHint and child.Name ~= "NORLI_Selection" then
+					table.insert(items, {obj = child, depth = depth})
+					scan(child, depth + 1)
+				end
+			end
+		end
+
+		scan(DesignRoot, 0)
+
+		if #items == 0 then
+			addTag(panelBody, "NENHUM ELEMENTO AINDA — vá em OBJETOS ou MODELOS")
+			return
+		end
+
+		addTag(panelBody, tostring(#items) .. " elemento(s)")
+
+		for _, item in ipairs(items) do
+			layerRow(panelBody, item.obj, item.depth)
+		end
+	end
+
+	refreshLayers()
+end
+
+refreshProperties = function()
+	if currentTab ~= "INSPECT" or not panelBody then return end
+
+	clearBody(panelBody)
+
+	if not selected then
+		addTag(panelBody, "SELECIONE UM ELEMENTO NO CANVAS")
+		button(panelBody, "☷  ABRIR CAMADAS", function()
+			openTab("LAYERS")
+		end)
+		return
+	end
+
+	addTag(panelBody, selected.ClassName .. "  •  " .. selected.Name)
+
+	section(panelBody, "AÇÕES RÁPIDAS")
+
+	button(panelBody, "▣  DUPLICAR", function()
+		duplicateObject(selected)
+	end)
+
+	button(panelBody, isLocked(selected) and "🔓  DESTRAVAR" or "🔒  TRAVAR", function()
+		saveUndoPoint()
+		selected:SetAttribute("NORLI_Locked", not isLocked(selected))
+		showSelectionVisual()
+		refreshProperties()
+	end)
+
+	button(panelBody, "✕  APAGAR", function()
+		deleteObject(selected)
+	end)
+
+	section(panelBody, "GERAL")
+
+	textBox(panelBody, "NOME", selected.Name, function(v)
+		saveUndoPoint()
+		local cleaned = tostring(v):gsub("[^%w_]", "_")
+		if cleaned == "" then cleaned = "Element" end
+		selected.Name = cleaned
+		refreshLayers()
+		refreshProperties()
+	end)
+
+	compactRow(panelBody, "ROTAÇÃO", tostring(round(selected.Rotation)), function(label)
+		selected.Rotation -= 5
+		label.Text = tostring(round(selected.Rotation))
+		showSelectionVisual()
+	end, function(label)
+		selected.Rotation += 5
+		label.Text = tostring(round(selected.Rotation))
+		showSelectionVisual()
+	end)
+
+	compactRow(panelBody, "ZINDEX", tostring(selected.ZIndex), function(label)
+		selected.ZIndex = clamp(selected.ZIndex - 1, 0, 999)
+		label.Text = tostring(selected.ZIndex)
+	end, function(label)
+		selected.ZIndex = clamp(selected.ZIndex + 1, 0, 999)
+		label.Text = tostring(selected.ZIndex)
+	end)
+
+	section(panelBody, "POSIÇÃO / TAMANHO")
+
+	compactRow(panelBody, "X", tostring(round(selected.Position.X.Offset)), function(label)
+		selected.Position = UDim2.new(selected.Position.X.Scale, selected.Position.X.Offset - 5, selected.Position.Y.Scale, selected.Position.Y.Offset)
+		label.Text = tostring(round(selected.Position.X.Offset))
+		showSelectionVisual()
+	end, function(label)
+		selected.Position = UDim2.new(selected.Position.X.Scale, selected.Position.X.Offset + 5, selected.Position.Y.Scale, selected.Position.Y.Offset)
+		label.Text = tostring(round(selected.Position.X.Offset))
+		showSelectionVisual()
+	end)
+
+	compactRow(panelBody, "Y", tostring(round(selected.Position.Y.Offset)), function(label)
+		selected.Position = UDim2.new(selected.Position.X.Scale, selected.Position.X.Offset, selected.Position.Y.Scale, selected.Position.Y.Offset - 5)
+		label.Text = tostring(round(selected.Position.Y.Offset))
+		showSelectionVisual()
+	end, function(label)
+		selected.Position = UDim2.new(selected.Position.X.Scale, selected.Position.X.Offset, selected.Position.Y.Scale, selected.Position.Y.Offset + 5)
+		label.Text = tostring(round(selected.Position.Y.Offset))
+		showSelectionVisual()
+	end)
+
+	compactRow(panelBody, "LARGURA", tostring(round(selected.Size.X.Offset)), function(label)
+		selected.Size = UDim2.new(selected.Size.X.Scale, clamp(selected.Size.X.Offset - 5, 5, 3000), selected.Size.Y.Scale, selected.Size.Y.Offset)
+		label.Text = tostring(round(selected.Size.X.Offset))
+		showSelectionVisual()
+	end, function(label)
+		selected.Size = UDim2.new(selected.Size.X.Scale, clamp(selected.Size.X.Offset + 5, 5, 3000), selected.Size.Y.Scale, selected.Size.Y.Offset)
+		label.Text = tostring(round(selected.Size.X.Offset))
+		showSelectionVisual()
+	end)
+
+	compactRow(panelBody, "ALTURA", tostring(round(selected.Size.Y.Offset)), function(label)
+		selected.Size = UDim2.new(selected.Size.X.Scale, selected.Size.X.Offset, selected.Size.Y.Scale, clamp(selected.Size.Y.Offset - 5, 5, 3000))
+		label.Text = tostring(round(selected.Size.Y.Offset))
+		showSelectionVisual()
+	end, function(label)
+		selected.Size = UDim2.new(selected.Size.X.Scale, selected.Size.X.Offset, selected.Size.Y.Scale, clamp(selected.Size.Y.Offset + 5, 5, 3000))
+		label.Text = tostring(round(selected.Size.Y.Offset))
+		showSelectionVisual()
+	end)
+
+	section(panelBody, "VISIBILIDADE / COMPORTAMENTO")
+
+	boolSwitch(panelBody, "VISÍVEL", selected.Visible, function(v)
+		selected.Visible = v
+		refreshLayers()
+	end)
+
+	boolSwitch(panelBody, "CLIPS DESCENDENTES", selected.ClipsDescendants, function(v)
+		selected.ClipsDescendants = v
+	end)
+
+	boolSwitch(panelBody, "ATIVO", selected.Active, function(v)
+		selected.Active = v
+	end)
+
+	if selected:IsA("GuiButton") then
+		boolSwitch(panelBody, "INTERACTABLE", safeGet(selected, "Interactable") == true, function(v)
+			safeSet(selected, "Interactable", v)
+		end)
+	end
+
+	if selected:IsA("TextLabel") or selected:IsA("TextButton") or selected:IsA("TextBox") then
+		section(panelBody, "TEXTO")
+
+		textBox(panelBody, "TEXTO", selected.Text, function(v)
+			saveUndoPoint()
+			selected.Text = v
+		end)
+
+		compactRow(panelBody, "TAMANHO", tostring(selected.TextSize), function(label)
+			selected.TextSize = clamp(selected.TextSize - 1, 6, 120)
+			label.Text = tostring(selected.TextSize)
+		end, function(label)
+			selected.TextSize = clamp(selected.TextSize + 1, 6, 120)
+			label.Text = tostring(selected.TextSize)
+		end)
+
+		boolSwitch(panelBody, "TEXT SCALED", selected.TextScaled, function(v)
+			selected.TextScaled = v
+		end)
+
+		boolSwitch(panelBody, "TEXT WRAPPED", selected.TextWrapped, function(v)
+			selected.TextWrapped = v
+		end)
+
+		button(panelBody, "FONTE: " .. selected.Font.Name .. "  ▾", function()
+			local drop = panelBody:FindFirstChild("NORLI_FontDrop")
+			if drop then drop:Destroy() return end
+
+			local list = make("ScrollingFrame", {
+				Name = "NORLI_FontDrop",
+				Size = UDim2.new(1, 0, 0, 210),
+				BackgroundColor3 = C.surface2,
+				BorderSizePixel = 0,
+				ScrollBarThickness = 3,
+				ScrollBarImageColor3 = C.accent,
+				CanvasSize = UDim2.new(),
+				ZIndex = 250,
+			}, panelBody)
+			corner(list, 10)
+
+			local layout = make("UIListLayout", {
+				Padding = UDim.new(0, 4),
+				SortOrder = Enum.SortOrder.Name,
+			}, list)
+
+			make("UIPadding", {
+				PaddingTop = UDim.new(0, 6),
+				PaddingBottom = UDim.new(0, 6),
+				PaddingLeft = UDim.new(0, 6),
+				PaddingRight = UDim.new(0, 6),
+			}, list)
+
+			local fonts = Enum.Font:GetEnumItems()
+			table.sort(fonts, function(a, b) return a.Name < b.Name end)
+
+			for _, font in ipairs(fonts) do
+				local fontButton = make("TextButton", {
+					Size = UDim2.new(1, 0, 0, 32),
+					BackgroundColor3 = C.card,
+					BorderSizePixel = 0,
+					AutoButtonColor = false,
+					Text = font.Name,
+					Font = font,
+					TextSize = 14,
+					TextColor3 = C.text,
+					ZIndex = 251,
+				}, list)
+				corner(fontButton, 8)
+
+				fontButton.Activated:Connect(function()
+					saveUndoPoint()
+					selected.Font = font
+					list:Destroy()
+					refreshProperties()
+				end)
+			end
+
+			layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+				list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+			end)
+		end, 38)
+	end
+
+	if selected:IsA("ImageLabel") or selected:IsA("ImageButton") then
+		section(panelBody, "IMAGEM")
+
+		textBox(panelBody, "IMAGE", selected.Image, function(v)
+			saveUndoPoint()
+			selected.Image = v
+		end, "rbxassetid://...")
+	end
+
+	if selected:IsA("ScrollingFrame") then
+		section(panelBody, "SCROLL")
+
+		compactRow(panelBody, "CANVAS Y", tostring(round(selected.CanvasSize.Y.Offset)), function(label)
+			selected.CanvasSize = UDim2.new(selected.CanvasSize.X.Scale, selected.CanvasSize.X.Offset, selected.CanvasSize.Y.Scale, selected.CanvasSize.Y.Offset - 20)
+			label.Text = tostring(round(selected.CanvasSize.Y.Offset))
+		end, function(label)
+			selected.CanvasSize = UDim2.new(selected.CanvasSize.X.Scale, selected.CanvasSize.X.Offset, selected.CanvasSize.Y.Scale, selected.CanvasSize.Y.Offset + 20)
+			label.Text = tostring(round(selected.CanvasSize.Y.Offset))
+		end)
+
+		compactRow(panelBody, "BARRA", tostring(selected.ScrollBarThickness), function(label)
+			selected.ScrollBarThickness = clamp(selected.ScrollBarThickness - 1, 1, 20)
+			label.Text = tostring(selected.ScrollBarThickness)
+		end, function(label)
+			selected.ScrollBarThickness = clamp(selected.ScrollBarThickness + 1, 1, 20)
+			label.Text = tostring(selected.ScrollBarThickness)
+		end)
+	end
+end
+
+local function openStyle()
+	local body = createDrawer("ESTILO")
+
+	if not selected then
+		addTag(body, "SELECIONE UM ELEMENTO PARA EDITAR ESTILO")
+		return
+	end
+
+	local function applyColorNoUndo(col)
+		if colorTarget == "Stroke" then
+			local s = ensureStroke(selected)
+			if s then
+				s.Color = col
+				s.Transparency = 0
+			end
+		else
+			safeSet(selected, colorTarget, col)
+		end
+		showSelectionVisual()
+	end
+
+	local function applyColor(col)
+		saveUndoPoint()
+		applyColorNoUndo(col)
+		toast("COR APLICADA", C.green)
+	end
+
+	section(body, "ALVO DA COR")
+
+	local targetRow = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 38),
+		BackgroundTransparency = 1,
+		ZIndex = 202,
+	}, body)
+
+	local targets = {
+		{key = "BackgroundColor3", label = "FUNDO"},
+		{key = "TextColor3", label = "TEXTO"},
+		{key = "Stroke", label = "BORDA"},
+		{key = "ImageColor3", label = "IMAGEM"},
+	}
+
+	for i, t in ipairs(targets) do
+		local b = button(targetRow, t.label, function()
+			colorTarget = t.key
+			toast("ALVO: " .. t.label, C.accent)
+		end, 34)
+		b.Size = UDim2.new(0.25, -3, 0, 34)
+		b.Position = UDim2.new((i - 1) * 0.25, 0, 0, 0)
+	end
+
+	section(body, "PALETA")
+
+	local gridFrame = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 235),
+		BackgroundTransparency = 1,
+		ZIndex = 202,
+	}, body)
+
+	make("UIGridLayout", {
+		CellSize = UDim2.new(0, 29, 0, 29),
+		CellPadding = UDim2.new(0, 5, 0, 5),
+		FillDirectionMaxCells = 7,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, gridFrame)
+
+	for _, col in ipairs(Palette) do
+		local swatch = make("TextButton", {
+			Size = UDim2.fromOffset(29, 29),
+			BackgroundColor3 = col,
+			BorderSizePixel = 0,
+			Text = "",
+			AutoButtonColor = false,
+			ZIndex = 203,
+		}, gridFrame)
+		corner(swatch, 8)
+
+		swatch.Activated:Connect(function()
+			applyColor(col)
+		end)
+	end
+
+	section(body, "COR PERSONALIZADA")
+
+	textBox(body, "HEX", "", function(v)
+		local hex = tostring(v):gsub("#", ""):gsub("%s", "")
+		if #hex == 6 then
+			local r = tonumber(hex:sub(1, 2), 16)
+			local g = tonumber(hex:sub(3, 4), 16)
+			local b = tonumber(hex:sub(5, 6), 16)
+			if r and g and b then
+				applyColor(Color3.fromRGB(r, g, b))
+			else
+				toast("HEX INVÁLIDO", C.red)
+			end
+		else
+			toast("USE EX: #FF00AA", C.muted)
+		end
+	end, "#RRGGBB")
+
+	section(body, "APARÊNCIA")
+
+	compactRow(body, "TRANSP. FUNDO", tostring(round(selected.BackgroundTransparency * 100)) .. "%", function(label)
+		selected.BackgroundTransparency = clamp(selected.BackgroundTransparency + 0.05, 0, 1)
+		label.Text = tostring(round(selected.BackgroundTransparency * 100)) .. "%"
+	end, function(label)
+		selected.BackgroundTransparency = clamp(selected.BackgroundTransparency - 0.05, 0, 1)
+		label.Text = tostring(round(selected.BackgroundTransparency * 100)) .. "%"
+	end)
+
+	local function getCornerRadius()
+		local c = selected:FindFirstChildOfClass("UICorner")
+		return c and c.CornerRadius.Offset or 0
+	end
+
+	compactRow(body, "CANTOS", tostring(getCornerRadius()), function(label)
+		corner(selected, clamp(getCornerRadius() - 2, 0, 120))
+		label.Text = tostring(getCornerRadius())
+	end, function(label)
+		corner(selected, clamp(getCornerRadius() + 2, 0, 120))
+		label.Text = tostring(getCornerRadius())
+	end)
+
+	local hasStroke = getStroke(selected) ~= nil
+	boolSwitch(body, "UISTROKE", hasStroke, function(v)
+		if v then
+			ensureStroke(selected)
+		else
+			removeUiStroke(selected)
+		end
+		refreshProperties()
+	end)
+
+	local stroke = getStroke(selected)
+	if stroke then
+		compactRow(body, "ESPESSURA", tostring(round(stroke.Thickness)), function(label)
+			stroke.Thickness = clamp(stroke.Thickness - 1, 1, 10)
+			label.Text = tostring(round(stroke.Thickness))
+		end, function(label)
+			stroke.Thickness = clamp(stroke.Thickness + 1, 1, 10)
+			label.Text = tostring(round(stroke.Thickness))
+		end)
+
+		compactRow(body, "TRANSP. BORDA", tostring(round(stroke.Transparency * 100)) .. "%", function(label)
+			stroke.Transparency = clamp(stroke.Transparency + 0.05, 0, 1)
+			label.Text = tostring(round(stroke.Transparency * 100)) .. "%"
+		end, function(label)
+			stroke.Transparency = clamp(stroke.Transparency - 0.05, 0, 1)
+			label.Text = tostring(round(stroke.Transparency * 100)) .. "%"
+		end)
+	end
+
+	section(body, "MODIFICADORES")
+
+	local function addModifier(className)
+		if not selected then return end
+		if selected:FindFirstChildOfClass(className) then
+			toast("JÁ EXISTE", C.muted)
+			return
+		end
+
+		saveUndoPoint()
+		local m = Instance.new(className)
+		m.Parent = selected
+		toast(className .. " ADICIONADO", C.green)
+	end
+
+	button(body, "＋ UICORNER", function() corner(selected, 10) toast("UICORNER", C.green) end)
+	button(body, "＋ UISTROKE", function() ensureStroke(selected) toast("UISTROKE", C.green) end)
+	button(body, "＋ UIGRADIENT", function() addModifier("UIGradient") end)
+	button(body, "＋ UIPADDING", function() addModifier("UIPadding") end)
+	button(body, "＋ UIASPECTRATIO", function() addModifier("UIAspectRatioConstraint") end)
+	button(body, "＋ UISIZECONSTRAINT", function() addModifier("UISizeConstraint") end)
+	button(body, "＋ UISCALE", function() addModifier("UIScale") end)
+	button(body, "＋ UILISTLAYOUT", function() addModifier("UIListLayout") end)
+	button(body, "＋ UIGRIDLAYOUT", function() addModifier("UIGridLayout") end)
+	button(body, "＋ UIPAGELAYOUT", function() addModifier("UIPageLayout") end)
+end
+
+local function openAlign()
+	local body = createDrawer("ALINHAR")
+
+	if not selected then
+		addTag(body, "SELECIONE UM ELEMENTO PARA ALINHAR")
+		return
+	end
+
+	addTag(body, "Alinha em relação ao pai ou ao canvas.")
+
+	button(body, "⬅ ESQUERDA", function() alignSelected("left") end)
+	button(body, "↔ CENTRAL HORIZONTAL", function() alignSelected("hcenter") end)
+	button(body, "➡ DIREITA", function() alignSelected("right") end)
+	button(body, "⬆ TOPO", function() alignSelected("top") end)
+	button(body, "↕ CENTRAL VERTICAL", function() alignSelected("vcenter") end)
+	button(body, "⬇ BAIXO", function() alignSelected("bottom") end)
+
+	section(body, "TAMANHO")
+
+	button(body, "⇱ PREENCHER PAI", function() alignSelected("fill") end)
+	button(body, "↔ PREENCHER LARGURA", function() alignSelected("fillw") end)
+	button(body, "↕ PREENCHER ALTURA", function() alignSelected("fillh") end)
+end
+
+local function openTemplates()
+	local body = createDrawer("MODELOS PRONTOS")
+
+	addTag(body, "Cria componentes prontos no canvas.")
+
+	button(body, "▣ BOTÃO", templateButton)
+	button(body, "▤ CARTÃO", templateCard)
+	button(body, "▤ LISTA", templateList)
+	button(body, "▦ TOP BAR", templateTopBar)
+	button(body, "◫ MODAL", templateModal)
+	button(body, "◧ TOAST", templateToast)
+	button(body, "⌨ INPUT", templateInput)
+end
+
+local function openAssets()
+	local body = createDrawer("ASSETS")
+
+	addTag(body, "A pesquisa usa a rede do executor quando disponível.")
+
+	local function applyAssetId(id)
+		if not selected then
+			toast("SELECIONE UM ELEMENTO", C.muted)
+			return
+		end
+
+		id = tostring(id):gsub("%D", "")
+		if id == "" then
+			toast("ID INVÁLIDO", C.red)
+			return
+		end
+
+		saveUndoPoint()
+
+		if selected:IsA("ImageLabel") or selected:IsA("ImageButton") then
+			selected.Image = "rbxassetid://" .. id
+			toast("IMAGEM APLICADA", C.green)
+		elseif selected:IsA("VideoFrame") then
+			selected.Video = "rbxassetid://" .. id
+			toast("VÍDEO APLICADO", C.green)
+		else
+			toast("SELECIONE IMAGEM OU VÍDEO", C.amber)
+			return
+		end
+
+		table.insert(recentAssets, 1, id)
+		refreshProperties()
+	end
+
+	section(body, "APLICAR POR ID")
+
+	textBox(body, "ASSET ID", "", function(v)
+		applyAssetId(v)
+	end, "ex.: 123456789")
+
+	section(body, "PESQUISAR CATÁLOGO")
+
+	local search = textBox(body, "PESQUISA", "", function() end, "ex.: icon, button, bg")
+	local status = addTag(body, "Aguardando pesquisa...")
+
+	local results = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 300),
+		BackgroundTransparency = 1,
+		ZIndex = 202,
+	}, body)
+
+	local resultGrid = make("UIGridLayout", {
+		CellSize = UDim2.new(0.48, 0, 0, 86),
+		CellPadding = UDim2.new(0, 7, 0, 7),
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, results)
+
+	local function doSearch(keyword)
+		keyword = tostring(keyword or ""):gsub("^%s+", ""):gsub("%s+$", "")
+		if keyword == "" then
+			status.Text = "Digite uma palavra-chave."
+			return
+		end
+
+		local req = getRequestFunction()
+		if not req then
+			status.Text = "Executor sem request/http_request."
+			return
+		end
+
+		status.Text = "Pesquisando..."
+
+		for _, child in ipairs(results:GetChildren()) do
+			if child:IsA("GuiButton") then child:Destroy() end
+		end
+
+		local url = "https://catalog.roblox.com/v1/search/items/details?Keyword=" .. urlEncode(keyword) .. "&Limit=30&SortType=0&Category=1&Subcategory=8"
+
+		task.spawn(function()
+			local ok, response = pcall(function()
+				return req({Url = url, Method = "GET"})
+			end)
+
+			if not ok or not response then
+				status.Text = "Falha ao consultar o catálogo."
+				return
+			end
+
+			local responseText = response.Body or response.body
+			if type(responseText) ~= "string" then
+				status.Text = "Resposta inválida."
+				return
+			end
+
+			local okJson, data = pcall(function() return HttpService:JSONDecode(responseText) end)
+			if not okJson or type(data) ~= "table" or type(data.data) ~= "table" then
+				status.Text = "Nenhum resultado compatível."
+				return
+			end
+
+			local count = 0
+
+			for _, item in ipairs(data.data) do
+				local id = item.id or item.assetId
+				local name = item.name or "Asset"
+
+				if id then
+					count += 1
+
+					local card = make("TextButton", {
+						BackgroundColor3 = C.card,
+						BorderSizePixel = 0,
+						AutoButtonColor = false,
+						Text = "",
+						ZIndex = 204,
+					}, results)
+					corner(card, 9)
+
+					make("TextLabel", {
+						Size = UDim2.new(1, -10, 0, 34),
+						Position = UDim2.new(0, 5, 0, 5),
+						BackgroundTransparency = 1,
+						Text = tostring(name),
+						Font = Enum.Font.GothamBold,
+						TextSize = 9,
+						TextColor3 = C.text,
+						TextWrapped = true,
+						ZIndex = 205,
+					}, card)
+
+					make("TextLabel", {
+						Size = UDim2.new(1, -10, 0, 22),
+						Position = UDim2.new(0, 5, 0, 43),
+						BackgroundTransparency = 1,
+						Text = "ID " .. tostring(id),
+						Font = Enum.Font.Code,
+						TextSize = 8,
+						TextColor3 = C.muted,
+						ZIndex = 205,
+					}, card)
+
+					card.Activated:Connect(function()
+						applyAssetId(id)
+					end)
+				end
+			end
+
+			results.Size = UDim2.new(1, 0, 0, math.max(300, math.ceil(count / 2) * 93))
+			status.Text = count > 0 and (count .. " resultado(s). Toque para aplicar.") or "Nenhum resultado."
+		end)
+	end
+
+	button(body, "🔎 PESQUISAR AGORA", function()
+		doSearch(search.Text)
+	end)
+end
+
+local function openProject()
+	local body = createDrawer("PROJETO")
+
+	section(body, "EXPORTAR PARA O JOGO")
+	addTag(body, "Gera um script Lua para criar a interface fora do editor.")
+
+	local exportBox = makeCodeBox(body, exportLua(), 170)
+
+	button(body, "⧉ COPIAR SCRIPT LUA", function()
+		if safeClipboard(exportBox.Text) then
+			toast("SCRIPT LUA COPIADO", C.green)
+		else
+			exportBox:CaptureFocus()
+			toast("COPIE MANUALMENTE", C.muted)
+		end
+	end)
+
+	button(body, "↻ ATUALIZAR LUA", function()
+		exportBox.Text = exportLua()
+		toast("LUA ATUALIZADO", C.accent)
+	end)
+
+	section(body, "SALVAR PROJETO")
+	addTag(body, "Copia um JSON do projeto para colar depois.")
+
+	local jsonBox = makeCodeBox(body, exportProjectJSON(), 130)
+
+	button(body, "💾 COPIAR JSON", function()
+		if safeClipboard(jsonBox.Text) then
+			toast("JSON COPIADO", C.green)
+		else
+			jsonBox:CaptureFocus()
+			toast("COPIE MANUALMENTE", C.muted)
+		end
+	end)
+
+	button(body, "↻ ATUALIZAR JSON", function()
+		jsonBox.Text = exportProjectJSON()
+		toast("JSON ATUALIZADO", C.accent)
+	end)
+
+	section(body, "CARREGAR PROJETO")
+	addTag(body, "Cole abaixo o JSON salvo anteriormente.")
+
+	local importBox = textBox(body, "COLE O JSON AQUI", "", function() end, "cole aqui...", true)
+
+	local armed = false
+	local importBtn = button(body, "⤓ IMPORTAR PROJETO", function()
+		if importBox.Text == "" then
+			toast("COLE UM JSON PRIMEIRO", C.muted)
+			return
+		end
+
+		if not armed then
+			armed = true
+			importBtn.Text = "⚠ TOQUE DE NOVO PARA CONFIRMAR"
+			importBtn.BackgroundColor3 = C.amber
+
+			task.delay(4, function()
+				if importBtn.Parent then
+					armed = false
+					importBtn.Text = "⤓ IMPORTAR PROJETO"
+					importBtn.BackgroundColor3 = C.card
+				end
+			end)
+			return
+		end
+
+		armed = false
+		importBtn.Text = "⤓ IMPORTAR PROJETO"
+		importBtn.BackgroundColor3 = C.card
+
+		importProjectJSON(importBox.Text)
+	end)
+
+	section(body, "NOVO PROJETO")
+
+	local newArmed = false
+	local newBtn = button(body, "🗑 LIMPAR CANVAS", function()
+		if not newArmed then
+			newArmed = true
+			newBtn.Text = "⚠ TOQUE DE NOVO PARA CONFIRMAR"
+			newBtn.BackgroundColor3 = C.amber
+
+			task.delay(4, function()
+				if newBtn.Parent then
+					newArmed = false
+					newBtn.Text = "🗑 LIMPAR CANVAS"
+					newBtn.BackgroundColor3 = C.card
+				end
+			end)
+			return
+		end
+
+		newArmed = false
+		saveUndoPoint()
+		clearCanvas()
+		toast("CANVAS LIMPO", C.amber)
+	end)
+end
+
+--// Tab bar -----------------------------------------------------------------
+local Tabs = make("ScrollingFrame", {
+	Size = UDim2.new(1, 0, 0, TABBAR_H),
+	Position = UDim2.new(0, 0, 1, -TABBAR_H),
+	BackgroundColor3 = C.surface,
+	BorderSizePixel = 0,
+	ZIndex = 10,
+	ScrollingDirection = Enum.ScrollingDirection.X,
+	ScrollBarThickness = 3,
+	ScrollBarImageColor3 = C.accent,
+	CanvasSize = UDim2.new(),
+}, Root)
+
+safeSet(Tabs, "AutomaticCanvasSize", Enum.AutomaticSize.X)
+
+make("UIListLayout", {
+	FillDirection = Enum.FillDirection.Horizontal,
+	Padding = UDim.new(0, 4),
+	VerticalAlignment = Enum.VerticalAlignment.Center,
+	SortOrder = Enum.SortOrder.LayoutOrder,
+}, Tabs)
+
+make("UIPadding", {
+	PaddingLeft = UDim.new(0, 4),
+	PaddingRight = UDim.new(0, 4),
+}, Tabs)
+
+local tabInfo = {
+	{id = "ELEMENTS", icon = "＋", label = "OBJETOS", fn = openElements},
+	{id = "LAYERS", icon = "☰", label = "CAMADAS", fn = openLayers},
+	{id = "INSPECT", icon = "☷", label = "INSPECT", fn = function() createDrawer("INSPECT"); refreshProperties() end},
+	{id = "STYLE", icon = "◈", label = "ESTILO", fn = openStyle},
+	{id = "ALIGN", icon = "⇄", label = "ALINHAR", fn = openAlign},
+	{id = "TEMPLATES", icon = "▤", label = "MODELOS", fn = openTemplates},
+	{id = "ASSETS", icon = "▧", label = "ASSETS", fn = openAssets},
+	{id = "PROJECT", icon = "↗", label = "PROJETO", fn = openProject},
+}
+
+openTab = function(id)
+	if currentTab == id and panel then
+		closePanel()
+		return
+	end
+
+	closePanel()
+	currentTab = id
+
+	for _, info in ipairs(tabInfo) do
+		if info.id == id then
+			info.fn()
+			break
+		end
+	end
+
+	updateTabColors()
+end
+
+for index, info in ipairs(tabInfo) do
+	local b = make("TextButton", {
+		Size = UDim2.fromOffset(86, 48),
+		LayoutOrder = index,
+		BackgroundColor3 = C.surface2,
+		BorderSizePixel = 0,
+		AutoButtonColor = false,
+		Text = info.icon .. "\n" .. info.label,
+		Font = Enum.Font.GothamBold,
+		TextSize = 8,
+		TextColor3 = C.text,
+		TextWrapped = true,
+		ZIndex = 11,
+	}, Tabs)
+	corner(b, 10)
+
+	tabButtons[info.id] = b
+
+	b.Activated:Connect(function()
+		openTab(info.id)
+	end)
+end
+
+--// Responsive ---------------------------------------------------------------
+local function responsive()
+	local camera = workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(800, 600)
+
+	if viewport.X < 480 then
+		Brand.TextSize = 12
+		Status.TextSize = 8
+
+		RestoreButton.Size = UDim2.fromOffset(58, 32)
+		RestoreButton.Position = UDim2.new(1, -186, 0, 12)
+		RestoreButton.Text = "UI"
+
+		PreviewButton.Size = UDim2.fromOffset(44, 32)
+		PreviewButton.Position = UDim2.new(1, -124, 0, 12)
+		PreviewButton.Text = "▶"
+
+		CloseButton.Size = UDim2.fromOffset(54, 32)
+		CloseButton.Position = UDim2.new(1, -76, 0, 12)
+		CloseButton.Text = "X"
+	else
+		Brand.TextSize = 15
+		Status.TextSize = 9
+
+		RestoreButton.Size = UDim2.fromOffset(92, 34)
+		RestoreButton.Position = UDim2.new(1, -260, 0, 11)
+		RestoreButton.Text = "↺ UI ROBLOX"
+
+		PreviewButton.Size = UDim2.fromOffset(64, 34)
+		PreviewButton.Position = UDim2.new(1, -162, 0, 11)
+		PreviewButton.Text = "▶ PREVIEW"
+
+		CloseButton.Size = UDim2.fromOffset(80, 34)
+		CloseButton.Position = UDim2.new(1, -92, 0, 11)
+		CloseButton.Text = "✕ FECHAR"
+	end
+end
+
+if workspace.CurrentCamera then
+	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(responsive)
+end
+responsive()
+
+--// Initial state ------------------------------------------------------------
+updateEmpty()
+openTab("ELEMENTS")
+toast("NORLI GUI STUDIO V4 PRO", C.green)
