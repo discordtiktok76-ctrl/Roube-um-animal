@@ -2245,15 +2245,15 @@ local newnamecall = newcclosure(function(remote, ...)
 		end
 	end
 	return original(remote, ...)
-end, original)
+end)
 
 local newFireServer = newcclosure(function(...)
 	return hookRemote("RemoteEvent", ...)
-end, originalEvent)
+end)
 
 local newInvokeServer = newcclosure(function(...)
 	return hookRemote("RemoteFunction", ...)
-end, originalFunction)
+end)
 
 --- Toggles on and off the remote spy
 function toggleSpy()
@@ -2365,6 +2365,8 @@ if not _G.SimpleSpyExecuted then
 			"rbxassetid://6065774948",
 			"rbxassetid://6065821086",
 			"rbxassetid://6065821596",
+			"rbxassetid://123316292759566",
+			"rbxassetid://122849223315912",
 			ImageLabel,
 			ImageLabel_2,
 			ImageLabel_3,
